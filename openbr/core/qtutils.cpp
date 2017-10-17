@@ -38,38 +38,6 @@ using namespace br;
 namespace QtUtils
 {
 
-QStringList getFiles(QDir dir, bool recursive)
-{
-    dir = QDir(dir.canonicalPath());
-
-    QStringList files;
-    foreach (const QString &file, naturalSort(dir.entryList(QDir::Files)))
-        files.append(dir.absoluteFilePath(file));
-
-    if (!recursive) return files;
-
-    foreach (const QString &folder, naturalSort(dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot))) {
-        QDir subdir(dir);
-        bool success = subdir.cd(folder); if (!success) qFatal("cd failure.");
-        files.append(getFiles(subdir, true));
-    }
-    return files;
-}
-
-QStringList getFiles(const QString &regexp)
-{
-    QFileInfo fileInfo(regexp);
-    QDir dir(fileInfo.dir());
-    QRegExp re(fileInfo.fileName());
-    re.setPatternSyntax(QRegExp::Wildcard);
-
-    QStringList files;
-    foreach (const QString &fileName, dir.entryList(QDir::Files))
-        if (re.exactMatch(fileName))
-            files.append(dir.filePath(fileName));
-    return files;
-}
-
 QStringList readLines(const QString &file)
 {
     QStringList lines;
@@ -388,6 +356,11 @@ QStringList naturalSort(const QStringList &strings)
 
 bool runRScript(const QString &file)
 {
+// iOS doesn't support QProcess
+#ifdef QT_NO_PROCESS
+    (void) file;
+    return false;
+#else // !QT_NO_PROCESS
     QProcess RScript;
     RScript.start("Rscript", QStringList() << file);
     RScript.waitForFinished(-1);
@@ -396,14 +369,21 @@ bool runRScript(const QString &file)
                         "See online documentation of 'br_plot' for required R packages.  "
                         "Otherwise, try running Rscript on %s to get the exact error.", qPrintable(file));
     return result;
+#endif // QT_NO_PROCESS
 }
 
 bool runDot(const QString &file)
 {
+// iOS doesn't support QProcess
+#ifdef QT_NO_PROCESS
+    (void) file;
+    return false;
+#else // !QT_NO_PROCESS
     QProcess dot;
     dot.start("dot -Tpdf -O " + file);
     dot.waitForFinished(-1);
     return ((dot.exitCode() == 0) && (dot.error() == QProcess::UnknownError));
+#endif // QT_NO_PROCESS
 }
 
 void showFile(const QString &file)
@@ -430,7 +410,11 @@ QString toString(const QVariant &variant)
                                             QString::number(rect.y()),
                                             QString::number(rect.width()),
                                             QString::number(rect.height()));
-    } else if (variant.canConvert<cv::Mat>()) return OpenCVUtils::matrixToString(variant.value<cv::Mat>());
+    } else if (variant.canConvert<cv::Mat>()) {
+        return OpenCVUtils::matrixToString(variant.value<cv::Mat>());
+    } else if (variant.canConvert<cv::RotatedRect>()) {
+        return OpenCVUtils::rotatedRectToString(variant.value<cv::RotatedRect>());
+    }
 
     return QString();
 }
@@ -476,6 +460,11 @@ QString toTime(int s)
 float euclideanLength(const QPointF &point)
 {
     return sqrt(pow(point.x(), 2) + pow(point.y(), 2));
+}
+
+float orientation(const QPointF &pointA, const QPointF &pointB)
+{
+    return atan2(pointB.y() - pointA.y(), pointB.x() - pointA.x());
 }
 
 float overlap(const QRectF &r, const QRectF &s) {
@@ -533,7 +522,7 @@ bool BlockCompression::open(QIODevice::OpenMode mode)
         blockReader >> block_size;
         compressedBlock.resize(block_size);
         int read_count = blockReader.readRawData(compressedBlock.data(), block_size);
-        if (read_count != block_size)
+        if (read_count != int(block_size))
             qFatal("Failed to read initial block");
 
         decompressedBlock = qUncompress(compressedBlock);
@@ -555,7 +544,7 @@ void BlockCompression::close()
 
         quint32 bsize=  compressedBlock.size();
         blockWriter << bsize;
-        blockWriter.writeRawData(compressedBlock.data(), compressedBlock.size());
+        blockWriter.writeRawData(compressedBlock.constData(), compressedBlock.size());
     }
     // close the underlying device.
     basis->close();
@@ -572,7 +561,6 @@ void BlockCompression::setBasis(QIODevice *_basis)
 // block from basis
 qint64 BlockCompression::readData(char *data, qint64 remaining)
 {
-    qint64 initial = remaining;
     qint64 read = 0;
     while (remaining > 0) {
         // attempt to read the target amount of data
@@ -596,8 +584,8 @@ qint64 BlockCompression::readData(char *data, qint64 remaining)
 
             compressedBlock.resize(block_size);
             int actualRead = blockReader.readRawData(compressedBlock.data(), block_size);
-            if (actualRead != block_size)
-                qFatal("Bad read on nominal block size: %d, only got %d", block_size, remaining);
+            if (actualRead != int(block_size))
+                qFatal("Bad read on nominal block size: %d, only got %d", block_size, int(remaining));
 
             decompressedBlock = qUncompress(compressedBlock);
 
@@ -653,8 +641,8 @@ qint64 BlockCompression::writeData(const char *data, qint64 remaining)
                 quint32 block_size = compressedBlock.size();
                 blockWriter << block_size;
 
-                int write_count = blockWriter.writeRawData(compressedBlock.data(), block_size);
-                if (write_count != block_size)
+                int write_count = blockWriter.writeRawData(compressedBlock.constData(), block_size);
+                if (write_count != int(block_size))
                     qFatal("Didn't write enough data");
             }
             else

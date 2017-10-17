@@ -191,6 +191,7 @@ private:
 /*!
  * \ingroup transforms
  * \brief Wraps OpenCV cascade classifier
+ * \br_link http://docs.opencv.org/modules/objdetect/doc/cascade_classification.html
  * \author Josh Klontz \cite jklontz
  * \author David Crouse \cite dgcrouse
  */
@@ -201,7 +202,8 @@ class CascadeTransform : public MetaTransform
     Q_PROPERTY(int minSize READ get_minSize WRITE set_minSize RESET reset_minSize STORED false)
     Q_PROPERTY(int minNeighbors READ get_minNeighbors WRITE set_minNeighbors RESET reset_minNeighbors STORED false)
     Q_PROPERTY(bool ROCMode READ get_ROCMode WRITE set_ROCMode RESET reset_ROCMode STORED false)
-    
+    Q_PROPERTY(float scaleFactor READ get_scaleFactor WRITE set_scaleFactor RESET reset_scaleFactor STORED false)
+
     // Training parameters 
     Q_PROPERTY(int numStages READ get_numStages WRITE set_numStages RESET reset_numStages STORED false) 
     Q_PROPERTY(int w READ get_w WRITE set_w RESET reset_w STORED false)
@@ -226,7 +228,8 @@ class CascadeTransform : public MetaTransform
     BR_PROPERTY(int, minSize, 64)
     BR_PROPERTY(int, minNeighbors, 5)
     BR_PROPERTY(bool, ROCMode, false)
-        
+    BR_PROPERTY(float, scaleFactor, 1.2)
+
     // Training parameters - Default values provided trigger OpenCV defaults
     BR_PROPERTY(int, numStages, -1)
     BR_PROPERTY(int, w, -1)
@@ -381,6 +384,15 @@ class CascadeTransform : public MetaTransform
     {
         CascadeClassifier *cascade = cascadeResource.acquire();
         foreach (const Template &t, src) {
+            // As a special case, skip detection if the appropriate metadata already exists
+            if (t.file.contains(model)) {
+                Template u = t;
+                u.file.setRects(QList<QRectF>() << t.file.get<QRectF>(model));
+                u.file.set("Confidence", t.file.get<float>("Confidence", 1));
+                dst.append(u);
+                continue;
+            }
+
             const bool enrollAll = t.file.getBool("enrollAll");
 
             // Mirror the behavior of ExpandTransform in the special case
@@ -391,23 +403,44 @@ class CascadeTransform : public MetaTransform
             }
 
             for (int i=0; i<t.size(); i++) {
+                const int maxDetections = t.file.get<int>("MaxDetections", std::numeric_limits<int>::max());
+                const int minSize = t.file.get<int>("MinSize", this->minSize);
+                const int flags = (enrollAll && (maxDetections != 1)) ? 0 : CASCADE_FIND_BIGGEST_OBJECT;
+
                 Mat m;
                 OpenCVUtils::cvtUChar(t[i], m);
                 std::vector<Rect> rects;
                 std::vector<int> rejectLevels;
                 std::vector<double> levelWeights;
-                if (ROCMode) cascade->detectMultiScale(m, rects, rejectLevels, levelWeights, 1.2, minNeighbors, (enrollAll ? 0 : CASCADE_FIND_BIGGEST_OBJECT) | CASCADE_SCALE_IMAGE, Size(minSize, minSize), Size(), true);
-                else         cascade->detectMultiScale(m, rects, 1.2, minNeighbors, enrollAll ? 0 : CASCADE_FIND_BIGGEST_OBJECT, Size(minSize, minSize));
+                if (ROCMode) cascade->detectMultiScale(m, rects, rejectLevels, levelWeights, scaleFactor, minNeighbors, flags | CASCADE_SCALE_IMAGE, Size(minSize, minSize), Size(), true);
+                else         cascade->detectMultiScale(m, rects, scaleFactor, minNeighbors, flags, Size(minSize, minSize));
 
-                if (!enrollAll && rects.empty())
+                // It appears that flags is ignored for new model files:
+                // http://docs.opencv.org/modules/objdetect/doc/cascade_classification.html#cascadeclassifier-detectmultiscale
+                if ((flags == CASCADE_FIND_BIGGEST_OBJECT) && (rects.size() > 1)) {
+                    Rect biggest = rects[0];
+                    for (size_t j=0; j<rects.size(); j++)
+                        if (rects[j].area() > biggest.area())
+                            biggest = rects[j];
+                    rects.clear();
+                    rects.push_back(biggest);
+                }
+
+                bool empty = false;
+                if (!enrollAll && rects.empty()) {
+                    empty = true;
                     rects.push_back(Rect(0, 0, m.cols, m.rows));
+                }
 
-                for (size_t j=0; j<rects.size(); j++) {
+                const size_t detections = std::min(size_t(maxDetections), rects.size());
+                for (size_t j=0; j<detections; j++) {
                     Template u(t.file, m);
-                    if (rejectLevels.size() > j)
+                    if (empty) {
+                        u.file.set("Confidence",-std::numeric_limits<float>::max());
+                    } else if (rejectLevels.size() > j)
                         u.file.set("Confidence", rejectLevels[j]*levelWeights[j]);
-                    else 
-                        u.file.set("Confidence", 1);
+                    else
+                        u.file.set("Confidence", rects[j].area());
                     const QRectF rect = OpenCVUtils::fromRect(rects[j]);
                     u.file.appendRect(rect);
                     u.file.set(model, rect);

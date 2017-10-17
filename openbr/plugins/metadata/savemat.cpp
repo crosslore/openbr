@@ -21,7 +21,7 @@ namespace br
 
 /*!
  * \ingroup transforms
- * \brief Store the last matrix of the input template as a metadata key with input property name.
+ * \brief Store the last matrix of the input Template as a metadata key with input property name.
  * \author Charles Otto \cite caotto
  */
 class SaveMatTransform : public UntrainableMetaTransform
@@ -39,6 +39,35 @@ class SaveMatTransform : public UntrainableMetaTransform
 };
 
 BR_REGISTER(Transform, SaveMatTransform)
+
+/*!
+ * \ingroup transforms
+ * \brief Preserve the contents of the input template, updating just the specified metadata keys.
+ * \author Josh Klontz \cite jklontz
+ */
+class JustTransform : public UntrainableMetaTransform
+{
+    Q_OBJECT
+    Q_PROPERTY(br::Transform* transform READ get_transform WRITE set_transform RESET reset_transform)
+    Q_PROPERTY(QStringList keys READ get_keys WRITE set_keys RESET reset_keys STORED false)
+    BR_PROPERTY(br::Transform*, transform, NULL)
+    BR_PROPERTY(QStringList, keys, QStringList())
+
+    void project(const Template &src, Template &dst) const
+    {
+        dst = src;
+        Template tmp;
+        transform->project(src, tmp);
+        foreach (const QString &key, keys)
+            if (key == "_Points") {
+                dst.file.setPoints(tmp.file.points());
+            } else {
+                dst.file.set(key, tmp.file.value(key));
+            }
+    }
+};
+
+BR_REGISTER(Transform, JustTransform)
 
 } // namespace br
 

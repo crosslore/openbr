@@ -18,6 +18,7 @@
 
 #include <openbr/plugins/openbr_internal.h>
 #include <openbr/core/qtutils.h>
+#include <openbr/core/utility.h>
 
 namespace br
 {
@@ -26,7 +27,7 @@ namespace br
  * \ingroup galleries
  * \brief Reads/writes templates to/from folders.
  * \author Josh Klontz \cite jklontz
- * \param regexp An optional regular expression to match against the files extension.
+ * \br_property QString regexp An optional regular expression to match against the files extension.
  */
 class EmptyGallery : public Gallery
 {
@@ -35,6 +36,7 @@ class EmptyGallery : public Gallery
     BR_PROPERTY(QString, regexp, QString())
 
     qint64 gallerySize;
+    qint64 filesWritten;
 
     void init()
     {
@@ -46,6 +48,7 @@ class EmptyGallery : public Gallery
             it.next();
             gallerySize++;
         }
+        filesWritten = 0;
     }
 
     TemplateList readBlock(bool *done)
@@ -67,7 +70,7 @@ class EmptyGallery : public Gallery
             templates.append(future.result());
 
         // Add root folder
-        foreach (const QString &fileName, QtUtils::getFiles(file.name, false))
+        foreach (const QString &fileName, getFiles(file.name, false))
             templates.append(File(fileName, dir.dirName()));
 
         if (!regexp.isEmpty()) {
@@ -94,7 +97,9 @@ class EmptyGallery : public Gallery
 
         const QString newFormat = file.get<QString>("newFormat",QString());
         QString destination = file.name + "/" + (file.getBool("preservePath") ? t.file.path()+"/" : QString());
-        destination += (newFormat.isEmpty() ? t.file.fileName() : t.file.baseName()+newFormat);
+        const bool enumerate = file.get<bool>("enumerate",false);
+        destination += t.file.baseName() + (enumerate ? "_"+QString::number(filesWritten++) : QString());
+        destination += newFormat.isEmpty() ? t.file.suffix() : newFormat;
 
         QMutexLocker diskLocker(&diskLock); // Windows prefers to crash when writing to disk in parallel
         if (t.isNull()) {
@@ -112,10 +117,11 @@ class EmptyGallery : public Gallery
 
     static TemplateList getTemplates(const QDir &dir)
     {
-        const QStringList files = QtUtils::getFiles(dir, true);
-        TemplateList templates; templates.reserve(files.size());
-        foreach (const QString &file, files)
-            templates.append(File(file, dir.dirName()));
+        const QList<FilesWithLabel> filesWithLabels = getFilesWithLabels(dir);
+        TemplateList templates;
+        foreach (const FilesWithLabel &filesWithLabel, filesWithLabels)
+            foreach (const QString &file, filesWithLabel.second)
+                templates.append(File(file, filesWithLabel.first));
         return templates;
     }
 };

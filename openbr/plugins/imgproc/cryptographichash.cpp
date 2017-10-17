@@ -24,6 +24,7 @@ namespace br
 /*!
  * \ingroup transforms
  * \brief Wraps QCryptographicHash
+ * \br_link http://doc.qt.io/qt-5/qcryptographichash.html
  * \author Josh Klontz \cite jklontz
  */
 class CryptographicHashTransform : public UntrainableTransform
@@ -44,10 +45,10 @@ private:
     void project(const Template &src, Template &dst) const
     {
         const cv::Mat &m = src;
-        QByteArray data((const char *)m.data, int(m.total()*m.elemSize()));
-        QByteArray hash = QCryptographicHash::hash(data, (QCryptographicHash::Algorithm)algorithm);
+        const QByteArray data((const char *)m.data, int(m.total()*m.elemSize()));
+        const QByteArray hash = QCryptographicHash::hash(data, (QCryptographicHash::Algorithm)algorithm);
         cv::Mat n(1, hash.size(), CV_8UC1);
-        memcpy(n.data, hash.data(), hash.size());
+        memcpy(n.data, hash.constData(), hash.size());
         dst = Template(src.file, n);
     }
 };

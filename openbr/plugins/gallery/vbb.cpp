@@ -14,8 +14,6 @@
  * limitations under the License.                                            *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifdef CVMATIO
-
 #include <openbr/plugins/openbr_internal.h>
 
 namespace br
@@ -23,6 +21,10 @@ namespace br
 
 using namespace cv;
 
+/*!
+ * \brief DOCUMENT ME
+ * \author Unknown \cite unknown
+ */
 class vbbGallery : public Gallery
 {
     Q_OBJECT
@@ -88,5 +90,3 @@ BR_REGISTER(Gallery, vbbGallery)
 } // namespace br
 
 #include "gallery/vbb.moc"
-
-#endif

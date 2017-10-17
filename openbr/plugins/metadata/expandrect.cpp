@@ -21,45 +21,42 @@ namespace br
 
 /*!
  * \ingroup transforms
- * \brief Expand the width and height of a template's rects by input width and height factors.
+ * \brief Expand the width and height of a Template's rects by input width and height factors.
  * \author Charles Otto \cite caotto
+ * \author Brendan Klare \cite bklare
  */
 class ExpandRectTransform : public UntrainableTransform
 {
     Q_OBJECT
     Q_PROPERTY(float widthExpand READ get_widthExpand WRITE set_widthExpand RESET reset_widthExpand STORED false)
     Q_PROPERTY(float heightExpand READ get_heightExpand WRITE set_heightExpand RESET reset_heightExpand STORED false)
+    Q_PROPERTY(QString propName READ get_propName WRITE set_propName RESET reset_propName STORED false)
     BR_PROPERTY(float, widthExpand, .5)
     BR_PROPERTY(float, heightExpand, .5)
+    BR_PROPERTY(QString, propName, "")
+
     void project(const Template &src, Template &dst) const
     {
         dst = src;
-        QList<QRectF> rects = dst.file.rects();
+        dst.file.clearRects();
+        QList<QRectF> rects;
+
+        if (!propName.isEmpty())
+            rects.append(src.file.get<QRectF>(propName));
+        else
+            rects = src.file.rects();
+
         for (int i=0;i < rects.size(); i++) {
-            QRectF rect = rects[i];
+            qreal widthGrowth = rects[i].width() * widthExpand;
+            qreal heightGrowth = rects[i].height() * heightExpand;
 
-            qreal width = rect.width();
-            qreal height = rect.height();
-            float half_w_expansion = widthExpand / 2;
-            float half_h_expansion = heightExpand / 2;
-
-            qreal half_width = width * widthExpand;
-            qreal quarter_width = width * half_w_expansion;
-            qreal half_height = height * heightExpand;
-            qreal quarter_height = height * half_h_expansion;
-
-            rect.setX(std::max(qreal(0),(rect.x() - quarter_width)));
-            rect.setY(std::max(qreal(0),(rect.y() - quarter_height)));
-
-            qreal x2 = std::min(rect.width() + half_width + rect.x(), qreal(src.m().cols) - 1);
-            qreal y2 = std::min(rect.height() + half_height + rect.y(), qreal(src.m().rows) - 1);
-
-            rect.setWidth(x2 - rect.x());
-            rect.setHeight(y2 - rect.y());
-
-            rects[i] = rect;
+            qreal x = std::max(qreal(0), rects[i].x() - widthGrowth / 2.);
+            qreal y = std::max(qreal(0), rects[i].y() - heightGrowth / 2.);
+            dst.file.appendRect(QRectF(x, y,
+                             std::min(src.m().cols - x - 1, rects[i].width() + widthGrowth),
+                             std::min(src.m().rows - y - 1, rects[i].height() + heightGrowth)));
         }
-        dst.file.setRects(rects);
+
     }
 };
 

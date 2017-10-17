@@ -15,8 +15,8 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include <opencv2/imgproc/imgproc.hpp>
-
 #include <openbr/plugins/openbr_internal.h>
+#include <openbr/core/opencvutils.h>
 
 using namespace cv;
 
@@ -33,26 +33,21 @@ class RndRotateTransform : public UntrainableTransform
     Q_OBJECT
 
     Q_PROPERTY(QList<int> range READ get_range WRITE set_range RESET reset_range STORED false)
+    Q_PROPERTY(bool rotateMat READ get_rotateMat WRITE set_rotateMat RESET reset_rotateMat STORED false)
+    Q_PROPERTY(bool rotatePoints READ get_rotatePoints WRITE set_rotatePoints RESET reset_rotatePoints STORED false)
+    Q_PROPERTY(bool rotateRects READ get_rotateRects WRITE set_rotateRects RESET reset_rotateRects STORED false)
+    Q_PROPERTY(int centerIndex READ get_centerIndex WRITE set_centerIndex RESET reset_centerIndex STORED false)
     BR_PROPERTY(QList<int>, range, QList<int>() << -15 << 15)
+    BR_PROPERTY(bool, rotateMat, true)
+    BR_PROPERTY(bool, rotatePoints, true)
+    BR_PROPERTY(bool, rotateRects, true)
+    BR_PROPERTY(int, centerIndex, -1)
 
     void project(const Template &src, Template &dst) const {
-        int span = range.first() - range.last();
-        int angle = (rand() % span) + range.first();
-        Mat rotMatrix = getRotationMatrix2D(Point2f(src.m().rows/2,src.m().cols/2),angle,1.0);
-        warpAffine(src,dst,rotMatrix,Size(src.m().cols,src.m().rows));
-
-        QList<QPointF> points = src.file.points();
-        QList<QPointF> rotatedPoints;
-        for (int i=0; i<points.size(); i++) {
-            rotatedPoints.append(QPointF(points.at(i).x()*rotMatrix.at<double>(0,0)+
-                                         points.at(i).y()*rotMatrix.at<double>(0,1)+
-                                         rotMatrix.at<double>(0,2),
-                                         points.at(i).x()*rotMatrix.at<double>(1,0)+
-                                         points.at(i).y()*rotMatrix.at<double>(1,1)+
-                                         rotMatrix.at<double>(1,2)));
-        }
-
-        dst.file.setPoints(rotatedPoints);
+        const int span = range.first() - range.last();
+        const int angle = span == 0 ? range.first() : (rand() % span) + range.first();
+        const QPointF center = centerIndex == -1 ? QPointF(src.m().rows/2,src.m().cols/2) : src.file.points()[centerIndex];
+        OpenCVUtils::rotate(src, dst, angle, rotateMat, rotatePoints, rotateRects, center);
     }
 };
 

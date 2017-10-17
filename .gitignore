@@ -2,6 +2,8 @@
 3rdparty/LatentSDK*
 3rdparty/pittpatt*
 3rdparty/cvmatio
+3rdparty/dlib*
+3rdparty/libav*
 data/*/img
 data/*/vid
 data/PCSO/*
@@ -9,6 +11,7 @@ data/lfpw
 data/LFW
 build*
 scripts/results
+share/openbr/models
 
 ### Generic ###
 *.log
@@ -28,6 +31,9 @@ scripts/results
 ### R ###
 *.RData
 *.Rhistory
+
+### Python ###
+*.pyc
 
 ### Subversion ###
 *.svn*

@@ -22,7 +22,7 @@ namespace br
 
 /*!
  * \ingroup transforms
- * \brief Caches transform training.
+ * \brief Caches Transform training.
  * \author Josh Klontz \cite jklontz
  */
 class LoadStoreTransform : public MetaTransform
@@ -30,14 +30,12 @@ class LoadStoreTransform : public MetaTransform
     Q_OBJECT
     Q_PROPERTY(QString transformString READ get_transformString WRITE set_transformString RESET reset_transformString STORED false)
     Q_PROPERTY(QString fileName READ get_fileName WRITE set_fileName RESET reset_fileName STORED false)
+    Q_PROPERTY(Transform* transform READ get_transform WRITE set_transform RESET reset_transform STORED false)
     BR_PROPERTY(QString, transformString, "Identity")
     BR_PROPERTY(QString, fileName, QString())
+    BR_PROPERTY(Transform*, transform, NULL)
 
 public:
-    Transform *transform;
-
-    LoadStoreTransform() : transform(NULL) {}
-
     QString description(bool expanded = false) const
     {
         if (expanded) {
@@ -66,10 +64,12 @@ private:
         if (transform != NULL) return;
         if (fileName.isEmpty()) fileName = QRegExp("^[_a-zA-Z0-9]+$").exactMatch(transformString) ? transformString : QtUtils::shortTextHash(transformString);
 
-        if (!tryLoad())
+        if (!tryLoad()) {
             transform = make(transformString);
-        else
+            trainable = transform->trainable;
+        } else {
             trainable = false;
+        }
     }
 
     bool timeVarying() const
@@ -162,6 +162,84 @@ private:
 };
 
 BR_REGISTER(Transform, LoadStoreTransform)
+
+/*!
+ * \ingroup distances
+ * \brief Caches Distance training.
+ * \author Josh Klontz \cite jklontz
+ */
+class LoadStoreDistance : public Distance
+{
+    Q_OBJECT
+    Q_PROPERTY(QString distanceString READ get_distanceString WRITE set_distanceString RESET reset_distanceString STORED false)
+    Q_PROPERTY(QString fileName READ get_fileName WRITE set_fileName RESET reset_fileName STORED false)
+    BR_PROPERTY(QString, distanceString, QString())
+    BR_PROPERTY(QString, fileName, QString())
+
+    QSharedPointer<Distance> distance;
+
+private:
+    void init()
+    {
+        const QString resolvedFileName = getFileName();
+        if (resolvedFileName.isEmpty()) {
+            distance.reset(Distance::make(distanceString));
+            return;
+        }
+
+        qDebug("Loading %s", qPrintable(resolvedFileName));
+        QFile file(resolvedFileName);
+        if (!file.open(QFile::ReadOnly))
+            qFatal("Failed to open %s for reading.", qPrintable(resolvedFileName));
+
+        QDataStream stream(&file);
+        stream >> distanceString;
+
+        distance.reset(Distance::make(distanceString));
+        distance->load(stream);
+    }
+
+    QString getFileName() const
+    {
+        if (!fileName.isEmpty())
+            foreach (const QString &file, QStringList() << fileName
+                                                        << Globals->sdkPath + "/share/openbr/models/distances/" + fileName
+                                                        << Globals->sdkPath + "/../share/openbr/models/distances/" + fileName)
+                if (QFileInfo(file).exists())
+                    return file;
+        return QString();
+    }
+
+    void train(const TemplateList &src)
+    {
+        if (QFileInfo(getFileName()).exists())
+            return;
+
+        qDebug("Training %s", qPrintable(fileName));
+        distance->train(src);
+
+        qDebug("Storing %s", qPrintable(fileName));
+        QFile file(fileName);
+        if (!file.open(QFile::WriteOnly))
+            qFatal("Failed to open %s for writing.", qPrintable(fileName));
+
+        QDataStream stream(&file);
+        stream << distanceString;
+        distance->store(stream);
+    }
+
+    float compare(const Template &a, const Template &b) const
+    {
+        return distance->compare(a, b);
+    }
+
+    float compare(const uchar *a, const uchar *b, size_t size) const
+    {
+        return distance->compare(a, b, size);
+    }
+};
+
+BR_REGISTER(Distance, LoadStoreDistance)
 
 } // namespace br
 

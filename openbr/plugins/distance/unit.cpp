@@ -21,7 +21,7 @@ namespace br
 
 /*!
  * \ingroup distances
- * \brief Linear normalizes of a distance so the mean impostor score is 0 and the mean genuine score is 1.
+ * \brief Linear normalizes of a Distance so the mean impostor score is 0 and the mean genuine score is 1.
  * \author Josh Klontz \cite jklontz
  */
 class UnitDistance : public Distance
@@ -76,7 +76,18 @@ class UnitDistance : public Distance
 
     float compare(const Template &target, const Template &query) const
     {
-        return a * (distance->compare(target, query) - b);
+        return normalize(distance->compare(target, query));
+    }
+
+    float compare(const cv::Mat &target, const cv::Mat &query) const
+    {
+        return normalize(distance->compare(target, query));
+    }
+	
+	float normalize(float score) const
+    {
+        if (!Globals->scoreNormalization) return score;
+        return a * (score - b);
     }
 };
 

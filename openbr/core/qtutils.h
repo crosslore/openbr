@@ -19,6 +19,7 @@
 
 #include <QBuffer>
 #include <QByteArray>
+#include <QDataStream>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -34,8 +35,6 @@
 namespace QtUtils
 {
     /**** File Utilities ****/
-    QStringList getFiles(QDir dir, bool recursive);
-    QStringList getFiles(const QString &regexp);
     QStringList readLines(const QString &file);
     void readFile(const QString &file, QStringList &lines);
     void readFile(const QString &file, QByteArray &data, bool uncompress = false);
@@ -91,6 +90,7 @@ namespace QtUtils
 
     /**** Point Utilities ****/
     float euclideanLength(const QPointF &point);
+    float orientation(const QPointF &pointA, const QPointF &pointB);
 
     /**** Rect Utilities ****/
     float overlap(const QRectF &r, const QRectF &s);

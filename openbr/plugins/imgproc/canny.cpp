@@ -9,7 +9,8 @@ namespace br
 
 /*!
  * \ingroup transforms
- * \brief Warpper to OpenCV Canny edge detector
+ * \brief Wrapper to OpenCV Canny edge detector
+ * \br_link http://docs.opencv.org/doc/tutorials/imgproc/imgtrans/canny_detector/canny_detector.html
  * \author Scott Klum \cite sklum
  */
 class CannyTransform : public UntrainableTransform
@@ -20,7 +21,7 @@ class CannyTransform : public UntrainableTransform
     Q_PROPERTY(bool L2Gradient READ get_L2Gradient WRITE set_L2Gradient RESET reset_L2Gradient STORED false)
     BR_PROPERTY(double, threshold, 5)
     BR_PROPERTY(double, aperatureSize, 3)
-    BR_PROPERTY(bool, L2Gradient, false)
+    BR_PROPERTY(bool, L2Gradient, true)
 
     void project(const Template &src, Template &dst) const
     {

@@ -18,59 +18,59 @@
 
 #include <openbr/plugins/openbr_internal.h>
 
+#include <QtConcurrent>
+
 namespace br
 {
 
 /*!
  * \ingroup distances
- * \brief Fuses similarity scores across multiple matrices of compared templates
+ * \brief Fuses similarity scores across multiple matrices of compared Templates
  * \author Scott Klum \cite sklum
- * \note Operation: Mean, sum, min, max are supported.
+ * \br_property enum Operation Possible values are: [Mean, sum, min, max].
  */
-class FuseDistance : public Distance
+class FuseDistance : public ListDistance
 {
     Q_OBJECT
     Q_ENUMS(Operation)
-    Q_PROPERTY(QString description READ get_description WRITE set_description RESET reset_description STORED false)
     Q_PROPERTY(Operation operation READ get_operation WRITE set_operation RESET reset_operation STORED false)
     Q_PROPERTY(QList<float> weights READ get_weights WRITE set_weights RESET reset_weights STORED false)
-
-    QList<br::Distance*> distances;
 
 public:
     /*!< */
     enum Operation {Mean, Sum, Max, Min};
 
 private:
-    BR_PROPERTY(QString, description, "L2")
     BR_PROPERTY(Operation, operation, Mean)
     BR_PROPERTY(QList<float>, weights, QList<float>())
 
     void train(const TemplateList &src)
     {
         // Partition the templates by matrix
-        QList<int> split;
-        for (int i=0; i<src.at(0).size(); i++) split.append(1);
+        QList<int> splits;
+        for (int i=0; i<src.at(0).size(); i++) splits.append(1);
 
-        QList<TemplateList> partitionedSrc = src.partition(split);
-
-        while (distances.size() < partitionedSrc.size())
-            distances.append(make(description));
+        QList<TemplateList> partitionedSrc = src.split(splits);
 
         // Train on each of the partitions
+        QFutureSynchronizer<void> futures;
         for (int i=0; i<distances.size(); i++)
-            distances[i]->train(partitionedSrc[i]);
+            futures.addFuture(QtConcurrent::run(distances[i], &Distance::train, partitionedSrc[i]));
+        futures.waitForFinished();
     }
 
     float compare(const Template &a, const Template &b) const
     {
-        if (a.size() != b.size()) qFatal("Comparison size mismatch");
+        if (a.size() != distances.size() ||
+            b.size() != distances.size())
+            return -std::numeric_limits<float>::max();
 
         QList<float> scores;
         for (int i=0; i<distances.size(); i++) {
             float weight;
             weights.isEmpty() ? weight = 1. : weight = weights[i];
-            scores.append(weight*distances[i]->compare(Template(a.file, a[i]),Template(b.file, b[i])));
+            if (weight != 0)
+                scores.append(weight*distances[i]->compare(Template(a.file, a[i]),Template(b.file, b[i])));
         }
 
         switch (operation) {
@@ -90,23 +90,6 @@ private:
             qFatal("Invalid operation.");
         }
         return 0;
-    }
-
-    void store(QDataStream &stream) const
-    {
-        stream << distances.size();
-        foreach (Distance *distance, distances)
-            distance->store(stream);
-    }
-
-    void load(QDataStream &stream)
-    {
-        int numDistances;
-        stream >> numDistances;
-        while (distances.size() < numDistances)
-            distances.append(make(description));
-        foreach (Distance *distance, distances)
-            distance->load(stream);
     }
 };
 

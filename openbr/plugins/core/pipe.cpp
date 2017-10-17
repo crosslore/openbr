@@ -24,12 +24,11 @@ namespace br
 /*!
  * \ingroup Transforms
  * \brief Transforms in series.
+ *
+ * The source Template is given to the first transform and the resulting Template is passed to the next transform, etc.
+ *
  * \author Josh Klontz \cite jklontz
- *
- * The source br::Template is given to the first transform and the resulting br::Template is passed to the next transform, etc.
- *
- * \see ExpandTransform
- * \see ForkTransform
+ * \br_related_plugin ExpandTransform ForkTransform
  */
 class PipeTransform : public CompositeTransform
 {
@@ -57,13 +56,13 @@ class PipeTransform : public CompositeTransform
         while (i < transforms.size()) {
             // Conditional statement covers likely case that first transform is untrainable
             if (transforms[i]->trainable) {
-                qDebug() << "Training " << transforms[i]->description() << "\n...";
+                qDebug() << "Training" << transforms[i]->description() << "\n...";
                 transforms[i]->train(dataLines);
             }
 
             // if the transform is time varying, we can't project it in parallel
             if (transforms[i]->timeVarying()) {
-                qDebug() << "Projecting " << transforms[i]->description() << "\n...";
+                qDebug() << "Projecting" << transforms[i]->description() << "\n...";
                 for (int j=0; j < dataLines.size();j++) {
                     TemplateList junk;
                     splitFTEs(dataLines[j], junk);
@@ -178,6 +177,23 @@ class PipeTransform : public CompositeTransform
         transforms = flattened;
 
         CompositeTransform::init();
+    }
+
+    QByteArray likely(const QByteArray &indentation) const
+    {
+        QByteArray result;
+        result.append("{\n");
+        foreach (Transform *t, transforms) {
+            const QByteArray dst = t->likely(indentation + "  ");
+            if (dst == "src")
+                continue; // Not implemented
+            result.append(indentation + "  src := ");
+            result.append(dst);
+            result.append("\n");
+        }
+
+        result.append(indentation + "  src\n}");
+        return result;
     }
 
 protected:

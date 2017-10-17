@@ -67,25 +67,37 @@ struct AlgorithmCore
                model.isEmpty() ? "" : qPrintable(" to " + model));
 
         QScopedPointer<Transform> trainingWrapper(br::wrapTransform(transform.data(), "Stream(readMode=DistributeFrames)"));
-        TemplateList data(TemplateList::fromGallery(input));
+        TemplateList data(TemplateList::fromGallery(input,false));
 
-        if (transform.isNull()) qFatal("Null transform.");
+        if (abs(Globals->crossValidate) > 1)
+            for (int i=data.size()-1; i>=0; i--)
+                if (data[i].file.get<bool>("allPartitions",false))
+                    data.removeAt(i);
+
         qDebug("%d Training Files", data.size());
 
         Globals->startTime.start();
 
-        qDebug("Training Enrollment");
-        trainingWrapper->train(data);
+        if (!transform.isNull()) {
+            qDebug("Training Enrollment");
+            trainingWrapper->train(data);
+        }
 
         if (!distance.isNull() && distance->trainable()) {
-            if (Globals->crossValidate > 0)
-                for (int i=data.size()-1; i>=0; i--) if (data[i].file.get<bool>("allPartitions",false)) data.removeAt(i);
+            if (!transform.isNull()) {
+                qDebug("Projecting Enrollment");
+                trainingWrapper->projectUpdate(data,data);
+            }
 
-            qDebug("Projecting Enrollment");
-            trainingWrapper->projectUpdate(data,data);
+            TemplateList distanceData;
+            for (int i=0; i<data.size(); i++)
+                if (!data[i].file.fte && !data[i].file.getBool("FTE"))
+                    distanceData.append(data[i]);
+
+            data.clear();
 
             qDebug("Training Comparison");
-            distance->train(data);
+            distance->train(distanceData);
         }
 
         if (!model.isEmpty()) {
@@ -100,6 +112,9 @@ struct AlgorithmCore
 
     void simplifyTransform()
     {
+        if (transform.isNull())
+            return;
+
         bool newTForm = false;
         Transform *temp = transform->simplify(newTForm);
         if (newTForm)
@@ -200,8 +215,12 @@ struct AlgorithmCore
         stages.append(enroll);
 
         QString outputDesc;
-        if (fileExclusion)
-            outputDesc = "FileExclusion(" + gallery.flat() + ")+";
+        QScopedPointer<Transform> exclusionBase;
+        if (fileExclusion) {
+            exclusionBase.reset(Transform::make("FileExclusion(" + gallery.flat() + ")", NULL));
+            stages.prepend(exclusionBase.data());
+        }
+
         if (!noOutput)
             outputDesc.append("GalleryOutput("+gallery.flat()+")+");
 
@@ -257,7 +276,7 @@ struct AlgorithmCore
 
     void retrieveOrEnroll(const File &file, QScopedPointer<Gallery> &gallery, FileList &galleryFiles)
     {
-        if (!file.getBool("enroll") && (QStringList() << "gal" << "mem" << "template" << "ut").contains(file.suffix())) {
+        if (!file.getBool("enroll") && (QStringList() << "gal" << "mem" << "template" << "t").contains(file.suffix())) {
             // Retrieve it
             gallery.reset(Gallery::make(file));
             galleryFiles = gallery->files();
@@ -434,7 +453,7 @@ struct AlgorithmCore
             colEnrolledGallery = colGallery.baseName() + colGallery.hash() + '.' + targetExtension;
 
             // Check if we have to do real enrollment, and not just convert the gallery's type.
-            if (!(QStringList() << "gal" << "template" << "mem" << "ut").contains(colGallery.suffix()))
+            if (!(QStringList() << "gal" << "template" << "mem" << "t").contains(colGallery.suffix()))
                 enroll(colGallery, colEnrolledGallery);
 
             // If the gallery does have enrolled templates, but is not the right type, we do a simple
@@ -456,7 +475,7 @@ struct AlgorithmCore
         // which compares incoming templates against a gallery, we will handle enrollment of the row set by simply
         // building a transform that does enrollment (using the current algorithm), then does the comparison in one
         // step. This way, we don't have to retain the complete enrolled row gallery in memory, or on disk.
-        else if (!(QStringList() << "gal" << "mem" << "template" << "ut").contains(rowGallery.suffix()))
+        else if (!(QStringList() << "gal" << "mem" << "template" << "t").contains(rowGallery.suffix()))
             needEnrollRows = true;
 
         // At this point, we have decided how we will structure the comparison (either in transpose mode, or not), 
@@ -539,6 +558,11 @@ private:
         QFileInfo fileInfo(description);
         if (!fileInfo.exists() || fileInfo.isDir())
             fileInfo = QFileInfo(Globals->sdkPath + "/share/openbr/models/algorithms/" + description);
+
+        // Also check up one directory to handle the scenario where OpenBR is a submodule of another project
+        if (!fileInfo.exists() || fileInfo.isDir())
+            fileInfo = QFileInfo(Globals->sdkPath + "/../share/openbr/models/algorithms/" + description);
+
         if (fileInfo.exists() && !fileInfo.isDir()) {
             const QString filePath = fileInfo.canonicalFilePath();
             qDebug("Loading %s", qPrintable(filePath));
@@ -574,7 +598,7 @@ private:
 
         if ((words.size() < 1) || (words.size() > 2)) qFatal("Invalid algorithm format.");
 
-        transform = QSharedPointer<Transform>(Transform::make(words[0], NULL));
+        transform = QSharedPointer<Transform>(words[0].isEmpty() ? NULL : Transform::make(words[0], NULL));
         simplifyTransform();
 
         if (words.size() > 1) {
@@ -772,11 +796,12 @@ QSharedPointer<br::Distance> br::Distance::fromAlgorithm(const QString &algorith
 class pathInitializer : public Initializer
 {
     Q_OBJECT
+
     void initialize() const
     {
-        Globals->modelSearch.append(Globals->sdkPath + "/share/openbr/models/transforms/");
+        Globals->modelSearch.append(Globals->sdkPath + "/share/openbr/models/transforms");
+        Globals->modelSearch.append(Globals->sdkPath + "/../share/openbr/models/transforms");
     }
-
 };
 BR_REGISTER(Initializer, pathInitializer)
 

@@ -24,17 +24,17 @@ namespace br
 /*!
  * \ingroup distances
  * \brief Distances in series.
+ *
+ * The Templates are compared using each Distance in order.
+ * If the result of the comparison with any given distance is -FLOAT_MAX then this result is returned early.
+ * Otherwise the returned result is the value of comparing the Templates using the last Distance.
+ *
  * \author Josh Klontz \cite jklontz
  *
- * The templates are compared using each br::Distance in order.
- * If the result of the comparison with any given distance is -FLOAT_MAX then this result is returned early.
- * Otherwise the returned result is the value of comparing the templates using the last br::Distance.
  */
-class PipeDistance : public Distance
+class PipeDistance : public ListDistance
 {
     Q_OBJECT
-    Q_PROPERTY(QList<br::Distance*> distances READ get_distances WRITE set_distances RESET reset_distances)
-    BR_PROPERTY(QList<br::Distance*>, distances, QList<br::Distance*>())
 
     void train(const TemplateList &data)
     {

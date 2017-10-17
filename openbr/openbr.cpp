@@ -20,6 +20,7 @@
 #include "core/cluster.h"
 #include "core/eval.h"
 #include "core/fuse.h"
+#include "core/likely.h"
 #include "core/plot.h"
 #include "core/qtutils.h"
 #include "plugins/openbr_internal.h"
@@ -30,14 +31,13 @@ using namespace br;
 
 static int partialCopy(const QString &string, char *buffer, int buffer_length)
 {
-
-    QByteArray byteArray = string.toLocal8Bit();
+    const QByteArray byteArray = string.toLocal8Bit();
 
     int copyLength = std::min(buffer_length-1, byteArray.size());
     if (copyLength < 0)
         return byteArray.size() + 1;
 
-    memcpy(buffer, byteArray.data(), copyLength);
+    memcpy(buffer, byteArray.constData(), copyLength);
     buffer[copyLength] = '\0';
 
     return byteArray.size() + 1;
@@ -45,11 +45,8 @@ static int partialCopy(const QString &string, char *buffer, int buffer_length)
 
 const char *br_about()
 {
-    static QMutex aboutLock;
-    QMutexLocker lock(&aboutLock);
-    static QByteArray about = Context::about().toLocal8Bit();
-
-    return about.data();
+    static const QByteArray about = Context::about().toLocal8Bit();
+    return about.constData();
 }
 
 void br_cat(int num_input_galleries, const char *input_galleries[], const char *output_gallery)
@@ -124,9 +121,9 @@ void br_eval_classification(const char *predicted_gallery, const char *truth_gal
     EvalClassification(predicted_gallery, truth_gallery, predicted_property, truth_property);
 }
 
-void br_eval_clustering(const char *csv, const char *gallery, const char *truth_property)
+void br_eval_clustering(const char *clusters, const char *truth_gallery, const char *truth_property, bool cluster_csv, const char *cluster_property)
 {
-    EvalClustering(csv, gallery, truth_property);
+    EvalClustering(clusters, truth_gallery, truth_property, cluster_csv, cluster_property);
 }
 
 float br_eval_detection(const char *predicted_gallery, const char *truth_gallery, const char *csv, bool normalize, int minSize, int maxSize)
@@ -144,6 +141,16 @@ void br_eval_regression(const char *predicted_gallery, const char *truth_gallery
     EvalRegression(predicted_gallery, truth_gallery, predicted_property, truth_property);
 }
 
+void br_eval_knn(const char *knnGraph, const char *knnTruth, const char *csv)
+{
+    EvalKNN(knnGraph, knnTruth, csv);
+}
+
+void br_eval_eer(const char *predicted_xml, const char *gt_property, const char *distribution_property )
+{
+    EvalEER(predicted_xml, gt_property, distribution_property);
+}
+
 void br_finalize()
 {
     Context::finalize();
@@ -158,6 +165,8 @@ void br_fuse(int num_input_simmats, const char *input_simmats[],
 void br_initialize(int &argc, char *argv[], const char *sdk_path, bool use_gui)
 {
     Context::initialize(argc, argv, sdk_path, use_gui);
+    if (!Globals)
+        abort();
 }
 
 void br_initialize_default()
@@ -213,6 +222,11 @@ bool br_plot_metadata(int num_files, const char *files[], const char *columns, b
     return PlotMetadata(QtUtils::toStringList(num_files, files), columns, show);
 }
 
+bool br_plot_knn(int num_files, const char *files[], const char *destination, bool show)
+{
+    return PlotKNN(QtUtils::toStringList(num_files, files), destination, show);
+}
+
 float br_progress()
 {
     return Globals->progress();
@@ -252,10 +266,8 @@ int br_scratch_path(char *buffer, int buffer_length)
 
 const char *br_sdk_path()
 {
-    static QMutex sdkLock;
-    QMutexLocker lock(&sdkLock);
-    static QByteArray sdkPath = QDir(Globals->sdkPath).absolutePath().toLocal8Bit();
-    return sdkPath.data();
+    static const QByteArray sdkPath = QDir(Globals->sdkPath).absolutePath().toLocal8Bit();
+    return sdkPath.constData();
 }
 
 void br_get_header(const char *matrix, const char **target_gallery, const char **query_gallery)
@@ -265,8 +277,8 @@ void br_get_header(const char *matrix, const char **target_gallery, const char *
     BEE::readMatrixHeader(matrix, &targetGalleryString, &queryGalleryString);
     targetGalleryData = targetGalleryString.toLatin1();
     queryGalleryData = queryGalleryString.toLatin1();
-    *target_gallery = targetGalleryData.data();
-    *query_gallery = queryGalleryData.data();
+    *target_gallery = targetGalleryData.constData();
+    *query_gallery = queryGalleryData.constData();
 }
 
 void br_set_header(const char *matrix, const char *target_gallery, const char *query_gallery)
@@ -297,19 +309,22 @@ void br_train_n(int num_inputs, const char *inputs[], const char *model)
 
 const char *br_version()
 {
-    static QMutex versionLock;
-    QMutexLocker lock(&versionLock);
-    static QByteArray version = Context::version().toLocal8Bit();
+    static const QByteArray version = Context::version().toLocal8Bit();
     return version.data();
 }
 
 void br_slave_process(const char *baseName)
 {
+#ifdef BR_WITH_QTNETWORK
     WorkerProcess *worker = new WorkerProcess;
     worker->transform = Globals->algorithm;
     worker->baseName = baseName;
     worker->mainLoop();
     delete worker;
+#else
+    (void) baseName;
+    qFatal("multiprocess support requires building with QtNetwork enabled (set BR_WITH_QTNETWORK in cmake).");
+#endif
 }
 
 br_template br_load_img(const char *data, int len)
@@ -473,4 +488,9 @@ void br_close_gallery(br_gallery gallery)
 void br_deduplicate(const char *input_gallery, const char *output_gallery, const char *threshold)
 {
     br::Deduplicate(input_gallery, output_gallery, threshold);
+}
+
+void br_likely(const char *input_type, const char *output_type, const char *output_source_file)
+{
+    br::Likely(input_type, output_type, output_source_file);
 }

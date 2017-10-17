@@ -15,13 +15,16 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include <openbr/plugins/openbr_internal.h>
+#include <QAtomicInt>
+
+using namespace cv;
 
 namespace br
 {
 
 /*!
  * \ingroup transforms
- * \brief Gives time elapsed over a specified transform as a function of both images (or frames) and pixels.
+ * \brief Gives time elapsed over a specified Transform as a function of both images (or frames) and pixels.
  * \author Jordan Cheney \cite JordanCheney
  * \author Josh Klontz \cite jklontz
  */
@@ -32,10 +35,9 @@ class StopWatchTransform : public MetaTransform
     BR_PROPERTY(QString, description, "Identity")
 
     br::Transform *transform;
-    mutable QMutex mutex;
-    mutable long miliseconds;
-    mutable long images;
-    mutable long pixels;
+    mutable QAtomicInt milliseconds;
+    mutable QAtomicInt images;
+    mutable QAtomicInt pixels;
 
 public:
     StopWatchTransform()
@@ -46,9 +48,9 @@ public:
 private:
     void reset()
     {
-        miliseconds = 0;
-        images = 0;
-        pixels = 0;
+        milliseconds.fetchAndStoreOrdered(0);
+        images.fetchAndStoreOrdered(0);
+        pixels.fetchAndStoreOrdered(0);
     }
 
     void init()
@@ -58,7 +60,22 @@ private:
 
     void train(const QList<TemplateList> &data)
     {
+        QTime watch;
+        watch.start();
+
         transform->train(data);
+
+        milliseconds.fetchAndAddOrdered((int)watch.elapsed());
+        images.fetchAndAddOrdered(data.size());
+
+        // compute the total number of pixels we processed
+        foreach(const TemplateList &list, data) {
+          foreach(const Template &t, list) {
+            foreach(const cv::Mat &m, t) {
+              pixels.fetchAndAddOrdered(m.rows*m.cols);
+            }
+          }
+        }
     }
 
     void project(const Template &src, Template &dst) const
@@ -67,11 +84,11 @@ private:
         watch.start();
         transform->project(src, dst);
 
-        QMutexLocker locker(&mutex);
-        miliseconds += watch.elapsed();
-        images++;
-        foreach (const cv::Mat &m, src)
-            pixels += (m.rows * m.cols);
+        milliseconds.fetchAndAddOrdered(watch.elapsed());
+        images.fetchAndAddOrdered(1);
+        foreach (const cv::Mat &m, src) {
+            pixels.fetchAndAddOrdered(m.rows * m.cols);
+        }
     }
 
     void finalize(TemplateList &)
@@ -81,15 +98,24 @@ private:
                "\tTemplates/s: %g\n"
                "\tPixels/s: %g\n",
                qPrintable(description),
-               miliseconds / 1000.0,
-               images * 1000.0 / miliseconds,
-               pixels * 1000.0 / miliseconds);
+               milliseconds / 1000.0,
+               images * 1000.0 / milliseconds,
+               pixels * 1000.0 / milliseconds);
         reset();
     }
 
     void store(QDataStream &stream) const
     {
         transform->store(stream);
+
+        qDebug("\nTraining Profile for \"%s\"\n"
+               "\tSeconds: %g\n"
+               "\tTemplates/s: %g\n"
+               "\tPixels/s: %g\n",
+               qPrintable(description),
+               milliseconds / 1000.0,
+               images * 1000.0 / milliseconds,
+               pixels * 1000.0 / milliseconds);
     }
 
     void load(QDataStream &stream)

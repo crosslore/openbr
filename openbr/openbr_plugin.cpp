@@ -17,7 +17,8 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QFutureSynchronizer>
-#include <QLocalSocket>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaProperty>
 #include <qnumeric.h>
 #include <QPointF>
@@ -43,8 +44,6 @@
 
 using namespace br;
 using namespace cv;
-
-Q_DECLARE_METATYPE(QLocalSocket::LocalSocketState)
 
 static const QMetaObject *getInterface(const QObject *obj)
 {
@@ -97,6 +96,7 @@ void File::append(const File &other)
         }
     }
     append(other.m_metadata);
+    fte = fte | other.fte;
 }
 
 QList<File> File::split() const
@@ -111,7 +111,11 @@ QList<File> File::split(const QString &separator) const
     QList<File> files;
     foreach (const QString &word, name.split(separator, QString::SkipEmptyParts)) {
         File file(word);
-        file.append(m_metadata);
+        // If file metadata is empty after this constructor, it means that this is the
+        // file corresponding to *this.m_metadata, so we append its metadata to get
+        // the correct functionality
+        if (file.m_metadata.isEmpty())
+            file.append(m_metadata);
         files.append(file);
     }
     return files;
@@ -157,6 +161,8 @@ QVariant File::parse(const QString &value)
     if (ok) return point;
     const QRectF rect = QtUtils::toRect(value, &ok);
     if (ok) return rect;
+    const cv::RotatedRect rotatedRect = OpenCVUtils::rotateRectFromString(value, &ok);
+    if (ok) return QVariant::fromValue(rotatedRect);
     const int i = value.toInt(&ok);
     if (ok) return i;
     const float f = value.toFloat(&ok);
@@ -270,6 +276,17 @@ void File::appendRects(const QList<QRectF> &rects)
 void File::appendRects(const QList<cv::Rect> &rects)
 {
     appendRects(OpenCVUtils::fromRects(rects));
+}
+
+QList<RotatedRect> File::namedRotatedRects() const
+{
+    QList<RotatedRect> rects;
+    foreach (const QString &key, localMetadata().keys()) {
+        const QVariant &variant = m_metadata[key];
+        if (variant.canConvert<RotatedRect>())
+            rects.append(variant.value<RotatedRect>());
+    }
+    return rects;
 }
 
 /* File - private methods */
@@ -397,6 +414,139 @@ int FileList::failures() const
 }
 
 /* Template - global methods */
+template <typename T>
+static T findAndRemove(QVariantMap &map, const QString &key, const T &defaultValue)
+{
+    T result = defaultValue;
+    if (map.contains(key)) {
+        result = map.value(key).value<T>();
+        map.remove(key);
+    }
+    return result;
+}
+
+br_utemplate Template::toUniversalTemplate(const Template &t)
+{
+    QVariantMap map = t.file.localMetadata();
+
+    // QJsonObject::fromVariantMap (below) fails to convert
+    // QRects and QPoints to string, replacing them with null values.
+    // so hand-convert these weirdos
+    foreach (const QString &k, map.keys()) {
+        QVariant v = map[k];
+        if (v.canConvert(QVariant::PointF) || v.canConvert(QVariant::RectF)) {
+            QString newv = QtUtils::toString(v);
+            map[k] = newv;
+        }
+        // lists of points and rects, too
+        else if (v.type() == QVariant::List) {
+            QVariantList oldlist = qvariant_cast<QVariantList>(v);
+            if (!oldlist.isEmpty() && (oldlist.first().canConvert(QVariant::PointF) || oldlist.first().canConvert(QVariant::RectF))) {
+                QVariantList newlist;
+                foreach (const QVariant &subv, oldlist) {
+                    newlist.append(QtUtils::toString(subv));
+                }
+                map[k] = newlist;
+            }
+        }
+    }
+
+    const int32_t  algorithmID = findAndRemove<int32_t> (map, "AlgorithmID", 0);
+    const uint32_t frame       = findAndRemove<uint32_t>(map, "Frame"      , std::numeric_limits<uint32_t>::max());
+    const int32_t  x           = findAndRemove<int32_t> (map, "X"          , 0);
+    const int32_t  y           = findAndRemove<int32_t> (map, "Y"          , 0);
+    const uint32_t width       = findAndRemove<uint32_t>(map, "Width"      , 0);
+    const uint32_t height      = findAndRemove<uint32_t>(map, "Height"     , 0);
+    const float    confidence  = findAndRemove<float>   (map, "Confidence" , 0);
+    const uint32_t personID    = findAndRemove<uint32_t>(map, "PersonID"   , std::numeric_limits<uint32_t>::max());
+    const QByteArray metadata = QJsonDocument(QJsonObject::fromVariantMap(map)).toJson();
+    const Mat &m = t;
+    return br_new_utemplate(algorithmID, frame, x, y, width, height, confidence, personID, metadata.constData(), (const char*) m.data, m.rows * m.cols * m.elemSize());
+}
+
+Template Template::fromUniversalTemplate(br_const_utemplate ut)
+{
+    QVariantMap map = QJsonDocument::fromJson(QByteArray((const char*) ut->data)).object().toVariantMap();
+
+    // QJsonDocument::fromJson doesn't know about QRects and QPoints
+    // so convert any QStrings that can be converted
+    foreach (const QString &k, map.keys()) {
+        QVariant v = map[k];
+        QVariant newv;
+        bool istype;
+        if (v.type() == QVariant::String) {
+            QString vstr = qvariant_cast<QString>(v);
+            newv = QtUtils::toRect(vstr, &istype);
+            if (!istype) {
+                newv = QtUtils::toPoint(vstr, &istype);
+                if (!istype) {
+                    newv = v;
+                }
+            }
+            map[k] = newv;
+        }
+        // convert lists of rects and points, too
+        else if (v.type() == QVariant::List) {
+            QVariantList oldlist = qvariant_cast<QVariantList>(v);
+            if (!oldlist.isEmpty() && oldlist.first().type() == QVariant::String) {
+                QString test = qvariant_cast<QString>(oldlist.first());
+                QtUtils::toRect(test, &istype);
+                QVariantList newlist;
+                if (istype) {
+                    foreach (const QVariant &subv, oldlist) {
+                        newlist.append(QtUtils::toRect(qvariant_cast<QString>(subv)));
+                    }
+                } else {
+                    QtUtils::toPoint(test, &istype);
+                    if (istype) {
+                        foreach (const QVariant &subv, oldlist) {
+                            newlist.append(QtUtils::toPoint(qvariant_cast<QString>(subv)));
+                        }
+                    } else {
+                        newlist = oldlist;
+                    }
+                }
+                map[k] = newlist;
+            }
+        }
+    }
+
+    map.insert("AlgorithmID", ut->algorithmID);
+    map.insert("Frame"      , ut->frame      );
+    map.insert("X"          , ut->x          );
+    map.insert("Y"          , ut->y          );
+    map.insert("Width"      , ut->width      );
+    map.insert("Height"     , ut->height     );
+    map.insert("Confidence" , ut->confidence );
+    map.insert("PersonID"   , ut->personID   );
+    const Mat m = Mat(1, ut->fvSize, CV_8UC1, (void*)(ut->data + ut->mdSize)).clone();
+    return Template(File(map), m);
+}
+
+br_utemplate Template::readUniversalTemplate(QFile &file)
+{
+    const size_t headerSize = sizeof(br_universal_template);
+    br_universal_template *t = (br_universal_template*) malloc(headerSize);
+    file.read((char*) t, headerSize);
+
+    const size_t dataSize = t->mdSize + t->fvSize;
+    t = (br_universal_template*) realloc(t, headerSize + dataSize);
+    file.read((char*) &t->data, dataSize);
+    return t;
+}
+
+void Template::writeUniversalTemplate(QFile &file, br_const_utemplate t)
+{
+    const qint64 size = sizeof(br_universal_template) + t->mdSize + t->fvSize;
+    if (file.write((const char *) t, size) != size)
+        qFatal("Failed to write universal template!");
+}
+
+void Template::freeUniversalTemplate(br_const_utemplate t)
+{
+    free((void*) t);
+}
+
 QDataStream &br::operator<<(QDataStream &stream, const Template &t)
 {
     return stream << static_cast<const QList<cv::Mat>&>(t) << t.file;
@@ -408,7 +558,7 @@ QDataStream &br::operator>>(QDataStream &stream, Template &t)
 }
 
 /* TemplateList - public methods */
-TemplateList TemplateList::fromGallery(const br::File &gallery)
+TemplateList TemplateList::fromGallery(const br::File &gallery, bool partition)
 {
     TemplateList templates;
     foreach (const br::File &file, gallery.split()) {
@@ -432,77 +582,8 @@ TemplateList TemplateList::fromGallery(const br::File &gallery)
         if (gallery.getBool("reduce"))
             newTemplates = newTemplates.reduced();
 
-        const int crossValidate = gallery.get<int>("crossValidate");
-
-        // The leaveOneImageOut flag is used when we want to train on n-1 of a subject's images
-        // Thus, we find all the images for a particular subject, and set their partitions based on
-        // the crossValidate parameter
-        // Note that when the number of images per subject varies from subject to subject
-        // the number of subjects will decrease as the partition increases
-        if (gallery.getBool("leaveOneImageOut") && crossValidate > 0) {
-            QStringList labels;
-            for (int i=newTemplates.size()-1; i>=0; i--) {
-                newTemplates[i].file.set("Index", i+templates.size());
-                newTemplates[i].file.set("Gallery", file.name);
-
-                QString label = newTemplates.at(i).file.get<QString>("Label");
-                // Have we seen this subject before?
-                if (!labels.contains(label)) {
-                    labels.append(label);
-                    // Get indices belonging to this subject
-                    QList<int> labelIndices = newTemplates.find("Label",label);
-                    for (int j = 0; j < labelIndices.size(); j++) {
-                        // Set subject partitions
-                        newTemplates[labelIndices[j]].file.set("Partition",j%crossValidate);
-                    }
-                    // Extend the gallery for each partition
-                    for (int j=0; j<labelIndices.size(); j++) {
-                        for (int k=0; k<crossValidate; k++) {
-                            Template leaveOneImageOutTemplate = newTemplates[labelIndices[j]];
-                            if (k!=leaveOneImageOutTemplate.file.get<int>("Partition")) {
-                                leaveOneImageOutTemplate.file.set("Partition", k);
-                                leaveOneImageOutTemplate.file.set("targetOnly", true);
-                                newTemplates.insert(i+1,leaveOneImageOutTemplate);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            for (int i=newTemplates.size()-1; i>=0; i--) {
-                newTemplates[i].file.set("Index", i+templates.size());
-                newTemplates[i].file.set("Gallery", file.name);
-
-                if (crossValidate > 0) {
-                    if (newTemplates[i].file.getBool("duplicatePartitions")) {
-                        // The duplicatePartitions flag is used to add target images
-                        // crossValidate times to the simmat/mask
-                        // when multiple training sets are being used
-
-                        // Set template to the first parition
-                        newTemplates[i].file.set("Partition", QVariant(0));
-
-                        // Insert templates for all the other partitions
-                        for (int j=crossValidate-1; j>0; j--) {
-                            Template duplicatePartitionsTemplate = newTemplates[i];
-                            duplicatePartitionsTemplate.file.set("Partition", j);
-                            newTemplates.insert(i+1, duplicatePartitionsTemplate);
-                        }
-                    } else if (newTemplates[i].file.getBool("allPartitions")) {
-                        // The allPartitions flag is used to add an extended set
-                        // of target images to every partition
-                        newTemplates[i].file.set("Partition", -1);
-                    } else {
-                        if (!newTemplates[i].file.contains(("Partition"))) {
-                            // Direct use of "Label" is not general -cao
-                            const QByteArray md5 = QCryptographicHash::hash(newTemplates[i].file.get<QString>("Label").toLatin1(), QCryptographicHash::Md5);
-                            // Select the right 8 hex characters so that it can be represented as a 64 bit integer without overflow
-                            newTemplates[i].file.set("Partition", md5.toHex().right(8).toULongLong(0, 16) % crossValidate);
-                        }
-                    }
-                }
-            }
-        }
+        if (abs(Globals->crossValidate) > 1 && partition)
+            newTemplates = newTemplates.partition("Label");
 
         if (!templates.isEmpty() && gallery.get<bool>("merge", false)) {
             if (newTemplates.size() != templates.size())
@@ -596,6 +677,48 @@ QList<int> TemplateList::applyIndex(const QString &propName, const QHash<QString
     return result;
 }
 
+TemplateList TemplateList::partition(const QString &inputVariable, bool random, bool overwrite) const
+{
+    const int crossValidate = std::abs(Globals->crossValidate);
+    if (crossValidate < 2)
+        return *this;
+
+    TemplateList partitioned = *this;
+
+    if (Globals->verbose)
+        qDebug() << "Total templates before partition:" << partitioned.size();
+
+    for (int i=partitioned.size()-1; i>=0; i--) {
+        // See CrossValidateTransform for description of these variables
+        if (partitioned[i].file.getBool("duplicatePartitions")) {
+            partitioned[i].file.set("Partition", QVariant(0));
+            for (int j=crossValidate-1; j>0; j--) {
+                Template duplicateTemplate = partitioned[i].clone();
+                duplicateTemplate.file.set("Partition", j);
+                partitioned.insert(i+1, duplicateTemplate);
+            }
+        } else if (partitioned[i].file.getBool("allPartitions")) {
+            partitioned[i].file.set("Partition", -1);
+        } else {
+            if (partitioned[i].file.contains(inputVariable)) {
+                const QByteArray md5 = QCryptographicHash::hash(partitioned[i].file.get<QString>(inputVariable).toLatin1(), QCryptographicHash::Md5);
+                if (random) {
+                    partitioned[i].file.set("Partition", rand() % crossValidate);
+                } else if (!partitioned[i].file.contains("Partition") || overwrite) {
+                    // Select the right 8 hex characters so that it can be represented as a 64 bit integer without overflow
+                    partitioned[i].file.set("Partition", md5.toHex().right(8).toULongLong(0, 16) % crossValidate);
+                }
+            } else if (Globals->verbose)
+                qDebug() << QString("Template does not contain %1 key/value pair used to partition!").arg(inputVariable);
+        }
+    }
+
+    if (Globals->verbose)
+        qDebug() << "Total templates after partition:" << partitioned.size();
+
+    return partitioned;
+}
+
 /* Object - public methods */
 QStringList Object::parameters() const
 {
@@ -647,7 +770,7 @@ QStringList Object::prunedArguments(bool expanded) const
         const char *name = metaObject()->property(i).name();
 
         QVariant defaultVal = shellObject->property(name);
-        
+
         if (defaultVal != property(name))
             arguments.append(name + QString("=") + argument(i, expanded));
     }
@@ -858,6 +981,17 @@ QList<Object *> Object::getChildren() const
                     output.append((Object *) dist);
             }
         }
+        else if (variant.canConvert<Classifier *>()) {
+            Classifier *classifier = variant.value<Classifier *>();
+            if (classifier)
+                output.append((Object* ) variant.value<Classifier *>());
+        }
+        else if (variant.canConvert<QList<Classifier *> >()) {
+            foreach (const Classifier *classifier, variant.value<QList<Classifier *> >()) {
+                if (classifier)
+                    output.append((Object *) classifier);
+            }
+        }
     }
     return output;
 }
@@ -1040,11 +1174,6 @@ void Object::init(const File &file_)
 }
 
 /* Context - public methods */
-int br::Context::blocks(int size) const
-{
-    return std::ceil(1.f*size/blockSize);
-}
-
 bool br::Context::contains(const QString &name)
 {
     return property(qPrintable(name)).isValid();
@@ -1073,8 +1202,8 @@ void br::Context::setProperty(const QString &key, const QString &value)
     qDebug("Set %s%s", qPrintable(key), value.isEmpty() ? "" : qPrintable(" to " + value));
 
     if (key == "parallelism") {
-        if (parallelism <= 0) parallelism = 1;
-        QThreadPool::globalInstance()->setMaxThreadCount(parallelism);
+        if (parallelism != 0)
+            QThreadPool::globalInstance()->setMaxThreadCount(abs(parallelism));
     } else if (key == "log") {
         logFile.close();
         if (log.isEmpty()) return;
@@ -1098,25 +1227,27 @@ bool br::Context::checkSDKPath(const QString &sdkPath)
     return QFileInfo(sdkPath + "/share/openbr/openbr.bib").exists();
 }
 
-// We create our own when the user hasn't
+// We create our own when the user hasn't.
+// Since we can't ensure that it gets deleted last, we never delete it.
 static QCoreApplication *application = NULL;
 
 void br::Context::initialize(int &argc, char *argv[], QString sdkPath, bool useGui)
 {
-    qInstallMessageHandler(messageHandler);
-
     QString sep;
 #ifndef _WIN32
+  #ifndef __APPLE__
+    // Modern OS X will only define the DISPLAY environment variable if XQuartz
+    // is installed, so we only do this check on non-Apple Unix systems.
     useGui = useGui && (getenv("DISPLAY") != NULL);
+  #endif // __APPLE__
     sep = ":";
-#else
+#else // _WIN32
     sep = ";";
 #endif // not _WIN32
 
     // We take in argc as a reference due to:
     //   https://bugreports.qt-project.org/browse/QTBUG-5637
     // QApplication should be initialized before anything else.
-    // Since we can't ensure that it gets deleted last, we never delete it.
     if (QCoreApplication::instance() == NULL) {
 #ifndef BR_EMBEDDED
         if (useGui) application = new QApplication(argc, argv);
@@ -1127,11 +1258,42 @@ void br::Context::initialize(int &argc, char *argv[], QString sdkPath, bool useG
 #endif // BR_EMBEDDED
     }
 
+    // Search for SDK
+    if (sdkPath.isEmpty()) {
+        QStringList checkPaths; checkPaths << QCoreApplication::applicationDirPath() << QDir::currentPath();
+        checkPaths << QString(getenv("PATH")).split(sep, QString::SkipEmptyParts);
+        QSet<QString> checkedPaths; // Avoid infinite loops from symlinks
+
+        bool foundSDK = false;
+        foreach (const QString &path, checkPaths) {
+            if (foundSDK) break;
+            QDir dir(path);
+            do {
+                sdkPath = dir.absolutePath();
+                if (checkedPaths.contains(sdkPath)) break;
+                else                                checkedPaths.insert(sdkPath);
+                foundSDK = checkSDKPath(sdkPath);
+                dir.cdUp();
+            } while (!foundSDK && !dir.isRoot());
+        }
+
+        if (!foundSDK) {
+            qWarning("Unable to locate SDK (share/openbr/openbr.bib) automatically from paths: %s", qPrintable(checkPaths.join("\n")));
+            return;
+        }
+    } else {
+        if (!checkSDKPath(sdkPath)) {
+            qWarning("Unable to locate SDK from %s.", qPrintable(sdkPath));
+            return;
+        }
+    }
+
     QCoreApplication::setOrganizationName(COMPANY_NAME);
     QCoreApplication::setApplicationName(PRODUCT_NAME);
     QCoreApplication::setApplicationVersion(PRODUCT_VERSION);
 
     qRegisterMetaType<cv::Mat>();
+    qRegisterMetaType<cv::RotatedRect>();
     qRegisterMetaType<br::File>();
     qRegisterMetaType<br::FileList>();
     qRegisterMetaType<br::Template>();
@@ -1146,40 +1308,22 @@ void br::Context::initialize(int &argc, char *argv[], QString sdkPath, bool useG
     qRegisterMetaType< QList<br::Distance*> >();
     qRegisterMetaType< QList<br::Representation* > >();
     qRegisterMetaType< QList<br::Classifier* > >();
-    qRegisterMetaType< QAbstractSocket::SocketState> ();
-    qRegisterMetaType< QLocalSocket::LocalSocketState> ();
 
     Globals = new Context();
     Globals->init(File());
     Globals->useGui = useGui;
     Globals->algorithm = "Identity";
     Globals->path = getenv("DATA"); // our convention
-
-    Common::seedRNG();
-
-    // Search for SDK
-    if (sdkPath.isEmpty()) {
-        QStringList checkPaths; checkPaths << QCoreApplication::applicationDirPath() << QDir::currentPath();
-        checkPaths << QString(getenv("PATH")).split(sep, QString::SkipEmptyParts);
-
-        bool foundSDK = false;
-        foreach (const QString &path, checkPaths) {
-            if (foundSDK) break;
-            QDir dir(path);
-            do {
-                sdkPath = dir.absolutePath();
-                foundSDK = checkSDKPath(sdkPath);
-                dir.cdUp();
-            } while (!foundSDK && !dir.isRoot());
-        }
-
-        if (!foundSDK) qFatal("Unable to locate SDK automatically.");
-    } else {
-        if (!checkSDKPath(sdkPath)) qFatal("Unable to locate SDK from %s.", qPrintable(sdkPath));
-    }
     Globals->sdkPath = sdkPath;
 
-    QThreadPool::globalInstance()->setMaxThreadCount(Globals->parallelism);
+    // The message handler requires a valid `Globals` so we set it after `Globals` is constructed
+    qInstallMessageHandler(messageHandler);
+
+    // We seed with 0 instead of time(NULL) to have reproducible randomness
+    srand(0);
+
+    // Disable OpenCV parallelism, we prefer to parallelize at the image level
+    setNumThreads(0);
 
     // Trigger registered initializers
     QList< QSharedPointer<Initializer> > initializers = Factory<Initializer>::makeAll();
@@ -1189,6 +1333,8 @@ void br::Context::initialize(int &argc, char *argv[], QString sdkPath, bool useG
 
 void br::Context::finalize()
 {
+    qInstallMessageHandler(0);
+
     // Trigger registered finalizers
     QList< QSharedPointer<Initializer> > initializers = Factory<Initializer>::makeAll();
     foreach (const QSharedPointer<Initializer> &initializer, initializers)
@@ -1196,9 +1342,6 @@ void br::Context::finalize()
 
     delete Globals;
     Globals = NULL;
-
-    delete application;
-    application = NULL;
 }
 
 QString br::Context::about()
@@ -1278,12 +1421,24 @@ void br::Context::messageHandler(QtMsgType type, const QMessageLogContext &conte
         if (Globals->quiet) return;
         txt = QString("%1\n").arg(msg);
     } else {
+        // Ignore QSslSocket warnings, too much noise and not enough signal
+        if ((type == QtWarningMsg) && msg.contains("QSslSocket"))
+            return;
+
         switch (type) {
           case QtWarningMsg:  txt = QString("Warning: %1\n" ).arg(msg); break;
           case QtCriticalMsg: txt = QString("Critical: %1\n").arg(msg); break;
           default:            txt = QString("Fatal: %1\n"   ).arg(msg); break;
         }
-        txt += "  SDK Path: "  + Globals->sdkPath + "\n  File: " + QString(context.file) + "\n  Function: " + QString(context.function) + "\n  Line: " + QString::number(context.line) + "\n";
+
+        if (Globals->sdkPath != ":")
+            txt += "  SDK Path: "  + Globals->sdkPath + "\n";
+        if (!QString(context.file).isEmpty())
+            txt += "  File: " + QString(context.file) + "\n";
+        if (!QString(context.function).isEmpty())
+            txt += "  Function: " + QString(context.function) + "\n";
+        if (context.line != 0)
+            txt += "  Line: " + QString::number(context.line) + "\n";
     }
 
     std::cerr << txt.toStdString();
@@ -1482,7 +1637,8 @@ Transform *Transform::make(QString str, QObject *parent)
     // Base name not found? Try constructing it via LoadStore
     if (!Factory<Transform>::names().contains(parsed.suffix())
         && (QFileInfo(parsed.suffix()).exists()
-            || QFileInfo(Globals->sdkPath + "/share/openbr/models/transforms/"+parsed.suffix()).exists())) {
+            || QFileInfo(Globals->sdkPath + "/share/openbr/models/transforms/"+parsed.suffix()).exists()
+            || QFileInfo(Globals->sdkPath + "/../share/openbr/models/transforms/"+parsed.suffix()).exists())) {
         Transform *tform = make("<"+parsed.suffix()+">", parent);
         applyAdditionalProperties(parsed, tform);
         return tform;
@@ -1494,7 +1650,7 @@ Transform *Transform::make(QString str, QObject *parent)
 
     if (transform->independent) {
         File independent(".Independent");
-        independent.set("transform", qVariantFromValue<void*>(transform));
+        independent.set("transform", QVariant::fromValue(transform));
         transform = Factory<Transform>::make(independent);
     }
 
@@ -1505,7 +1661,7 @@ Transform *Transform::make(QString str, QObject *parent)
 Transform *Transform::clone() const
 {
    Transform *clone = Factory<Transform>::make("."+description(false));
-    return clone;
+   return clone;
 }
 
 static void _project(const Transform *transform, const Template *src, Template *dst)
@@ -1528,8 +1684,8 @@ void Transform::project(const TemplateList &src, TemplateList &dst) const
         dst.append(Template());
     QFutureSynchronizer<void> futures;
     for (int i=0; i<dst.size(); i++)
-        if (Globals->parallelism > 1) futures.addFuture(QtConcurrent::run(_project, this, &src[i], &dst[i]));
-        else                          _project(this, &src[i], &dst[i]);
+        if ((Globals->parallelism > 1) && (dst.size() > 1)) futures.addFuture(QtConcurrent::run(_project, this, &src[i], &dst[i]));
+        else                                                _project(this, &src[i], &dst[i]);
     futures.waitForFinished();
 }
 
@@ -1571,15 +1727,17 @@ Distance *Distance::make(QString str, QObject *parent)
     if (Globals->abbreviations.contains(str))
         return make(Globals->abbreviations[str], parent);
 
+    // Check for use of '<...>' as shorthand for LoadStore(...)
+    if (str.startsWith('<') && str.endsWith('>'))
+        return make("LoadStore(" + str.mid(1, str.size()-2) + ")", parent);
+
     { // Check for use of '+' as shorthand for Pipe(...)
         QStringList words = parse(str, '+');
         if (words.size() > 1)
             return make("Pipe([" + words.join(",") + "])", parent);
     }
 
-    File f = "." + str;
-    Distance *distance = Factory<Distance>::make(f);
-
+    Distance *const distance = Factory<Distance>::make("." + str);
     distance->setParent(parent);
     return distance;
 }

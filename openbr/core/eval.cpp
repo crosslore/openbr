@@ -19,9 +19,13 @@
 #include "openbr/core/common.h"
 #include "openbr/core/qtutils.h"
 #include "openbr/core/opencvutils.h"
+#include "openbr/core/evalutils.h"
 #include <QMapIterator>
+#include <cmath>
+#include <opencv2/highgui/highgui.hpp>
 
 using namespace cv;
+using namespace EvalUtils;
 
 namespace br
 {
@@ -73,7 +77,7 @@ static OperatingPoint getOperatingPointGivenFAR(const QList<OperatingPoint> &ope
     const float bTAR = TAR1 - mTAR*FAR1;
     const float mScore = (score2 - score1) / (FAR2 - FAR1);
     const float bScore = score1 - mScore*FAR1;
-    return OperatingPoint(mScore * FAR + bScore,FAR, mTAR * FAR + bTAR);
+    return OperatingPoint(mScore * FAR + bScore, FAR, mTAR * FAR + bTAR);
 }
 
 static OperatingPoint getOperatingPointGivenTAR(const QList<OperatingPoint> &operatingPoints, float TAR)
@@ -84,7 +88,6 @@ static OperatingPoint getOperatingPointGivenTAR(const QList<OperatingPoint> &ope
       if (index == operatingPoints.size())
             return OperatingPoint(operatingPoints.last().score, operatingPoints.last().FAR, TAR);
     }
-
 
     const float FAR1 = (index == 0 ? 0 : operatingPoints[index-1].FAR);
     const float TAR1 = (index == 0 ? 0 : operatingPoints[index-1].TAR);
@@ -98,16 +101,18 @@ static OperatingPoint getOperatingPointGivenTAR(const QList<OperatingPoint> &ope
     const float bScore = score1 - mScore*FAR1;
 
     const float FAR = (TAR - bTAR) / mTAR;
-    return OperatingPoint(mScore * FAR + bScore,FAR, TAR);
+    return OperatingPoint(mScore * FAR + bScore, FAR, TAR);
 }
 
 
-static float getCMC(const QVector<int> &firstGenuineReturns, int rank)
+static float getCMC(const QVector<int> &firstGenuineReturns, int rank, size_t possibleReturns = 0)
 {
-    int realizedReturns = 0, possibleReturns = 0;
+    bool calcPossible = possibleReturns ? false : true;
+    int realizedReturns = 0;
     foreach (int firstGenuineReturn, firstGenuineReturns) {
         if (firstGenuineReturn > 0) {
-            possibleReturns++;
+            if (calcPossible)
+                possibleReturns++;
             if (firstGenuineReturn <= rank) realizedReturns++;
         }
     }
@@ -134,17 +139,17 @@ static cv::Mat constructMatchingMask(const cv::Mat &scores, const FileList &targ
     return cv::Mat();
 }
 
-float Evaluate(const cv::Mat &scores, const FileList &target, const FileList &query, const QString &csv, int partition)
+float Evaluate(const cv::Mat &scores, const FileList &target, const FileList &query, const File &csv, int partition)
 {
     return Evaluate(scores, constructMatchingMask(scores, target, query, partition), csv, QString(), QString(), 0);
 }
 
-float Evaluate(const QString &simmat, const QString &mask, const QString &csv, unsigned int matches)
+float Evaluate(const QString &simmat, const QString &mask, const File &csv, unsigned int matches)
 {
     qDebug("Evaluating %s%s%s",
            qPrintable(simmat),
            mask.isEmpty() ? "" : qPrintable(" with " + mask),
-           csv.isEmpty() ? "" : qPrintable(" to " + csv));
+           csv.name.isEmpty() ? "" : qPrintable(" to " + csv));
 
     // Read similarity matrix
     QString target, query;
@@ -176,7 +181,7 @@ float Evaluate(const QString &simmat, const QString &mask, const QString &csv, u
     return Evaluate(scores, truth, csv, target, query, matches);
 }
 
-float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QString &target, const QString &query, unsigned int matches)
+float Evaluate(const Mat &simmat, const Mat &mask, const File &csv, const QString &target, const QString &query, unsigned int matches)
 {
     if (target.isEmpty() || query.isEmpty()) matches = 0;
     if (simmat.size() != mask.size())
@@ -192,7 +197,14 @@ float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QSt
     float result = -1;
 
     // Make comparisons
-    QList<Comparison> comparisons; comparisons.reserve(simmat.rows*simmat.cols);
+    QVector<Comparison> comparisons; comparisons.reserve(simmat.rows*simmat.cols);
+
+    // Flags rows as being mated or non-mated searches
+    // Positive value: mated search, negative value: non-mated search
+    // Value of 0: ignored search
+    QVector<int> genuineSearches(simmat.rows, 0);
+
+    int totalGenuineSearches = 0, totalImpostorSearches = 0;
     int genuineCount = 0, impostorCount = 0, numNaNs = 0;
     for (int i=0; i<simmat.rows; i++) {
         for (int j=0; j<simmat.cols; j++) {
@@ -203,27 +215,42 @@ float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QSt
             Comparison comparison(simmat_val, j, i, mask_val == BEE::Match);
             comparisons.append(comparison);
             if (comparison.genuine) {
+                if (genuineSearches[comparison.query] != 1) {
+                    genuineSearches[comparison.query] = 1;
+                    totalGenuineSearches++;
+                }
                 genuineCount++;
             } else {
+                if (genuineSearches[comparison.query] != 1) {
+                    genuineSearches[comparison.query] = -1;
+                }
                 impostorCount++;
             }                           
         }
     }
+
+    // This is not necessarily equal to (simmat.rows-totalGenuineSearches)
+    // since some rows could consist entirely of ignored values
+    foreach (int i, genuineSearches)
+        if (i<0) totalImpostorSearches++;
 
     if (numNaNs > 0) qWarning("Encountered %d NaN scores!", numNaNs);
     if (genuineCount == 0) qFatal("No genuine scores!");
     if (impostorCount == 0) qFatal("No impostor scores!");
 
     // Sort comparisons by simmat_val (score)
-    std::stable_sort(comparisons.begin(), comparisons.end());
+    std::sort(comparisons.begin(), comparisons.end());
 
     QList<OperatingPoint> operatingPoints;
+    QList<OperatingPoint> searchOperatingPoints;
     QList<float> genuines; genuines.reserve(sqrt((float)comparisons.size()));
     QList<float> impostors; impostors.reserve(comparisons.size());
     QVector<int> firstGenuineReturns(simmat.rows, 0);
 
     int falsePositives = 0, previousFalsePositives = 0;
     int truePositives = 0, previousTruePositives = 0;
+    int falseSearches = 0, previousFalseSearches = 0;
+    int trueSearches = 0, previousTrueSearches = 0;
     int index = 0;
     int EERIndex = 0;
     float minGenuineScore = std::numeric_limits<float>::max();
@@ -237,14 +264,26 @@ float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QSt
             const Comparison &comparison = comparisons[index];
             if (comparison.genuine) {
                 truePositives++;
+                if (genuineSearches[comparison.query] == 1) {
+                    genuineSearches[comparison.query]++;
+                    // True positive identification
+                    trueSearches++;
+                }
                 genuines.append(comparison.score);
                 if (firstGenuineReturns[comparison.query] < 1)
-                    firstGenuineReturns[comparison.query] = abs(firstGenuineReturns[comparison.query]) + 1;
+                    firstGenuineReturns[comparison.query] = (comparison.score == -std::numeric_limits<float>::max())
+                                                          ? std::numeric_limits<int>::max()
+                                                          : abs(firstGenuineReturns[comparison.query]) + 1;
                 if ((comparison.score != -std::numeric_limits<float>::max()) &&
                     (comparison.score < minGenuineScore))
                     minGenuineScore = comparison.score;
             } else {
                 falsePositives++;
+                if (genuineSearches[comparison.query] == -1) {
+                    genuineSearches[comparison.query]--;
+                    // False positive identification
+                    falseSearches++;
+                }
                 impostors.append(comparison.score);
                 if (firstGenuineReturns[comparison.query] < 1)
                     firstGenuineReturns[comparison.query]--;
@@ -265,11 +304,22 @@ float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QSt
             previousFalsePositives = falsePositives;
             previousTruePositives = truePositives;
         }
+
+        if ((falseSearches > previousFalseSearches) &&
+             (trueSearches > previousTrueSearches)) {
+            searchOperatingPoints.append(OperatingPoint(thresh, float(falseSearches)/totalImpostorSearches, float(trueSearches)/totalGenuineSearches));
+            previousFalseSearches = falseSearches;
+            previousTrueSearches = trueSearches;
+        }
     }
 
     if (operatingPoints.size() == 0) operatingPoints.append(OperatingPoint(1, 1, 1));
     if (operatingPoints.size() == 1) operatingPoints.prepend(OperatingPoint(0, 0, 0));
     if (operatingPoints.size() > 2)  operatingPoints.takeLast(); // Remove point (1,1)
+
+    if (searchOperatingPoints.size() == 0) searchOperatingPoints.append(OperatingPoint(1, 1, 1));
+    if (searchOperatingPoints.size() == 1) searchOperatingPoints.prepend(OperatingPoint(0, 0, 0));
+    if (searchOperatingPoints.size() > 2)  searchOperatingPoints.takeLast();
 
     // Write Metadata table
     QStringList lines;
@@ -302,33 +352,46 @@ float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QSt
         }
     }
 
-    // Write Detection Error Tradeoff (DET), PRE, REC
-    float FAR=0.000001;
+    // Write Detection Error Tradeoff (DET), PRE, REC, Identification Error Tradeoff (IET)
+    float expFAR = csv.get<float>("FAR", std::max(ceil(log10(impostorCount)), 1.0));
+    float expFRR = csv.get<float>("FRR", std::max(ceil(log10(genuineCount)), 1.0));
+    float expFPIR = csv.get<float>("FPIR", std::max(ceil(log10(totalImpostorSearches)), 1.0));
+
+    float FARstep = expFAR / (float)(Max_Points - 1);
+    float FRRstep = expFRR / (float)(Max_Points - 1);
+    float FPIRstep = expFPIR / (float)(Max_Points - 1);
+
     for (int i=0; i<Max_Points; i++) {
-        OperatingPoint operatingPoint = getOperatingPointGivenFAR(operatingPoints, FAR);
+        float FAR = pow(10, -expFAR + i*FARstep);
+        float FRR = pow(10, -expFRR + i*FRRstep);
+        float FPIR = pow(10, -expFPIR + i*FPIRstep);
+
+        OperatingPoint operatingPointFAR = getOperatingPointGivenFAR(operatingPoints, FAR);
+        OperatingPoint operatingPointTAR = getOperatingPointGivenTAR(operatingPoints, 1-FRR);
+        OperatingPoint searchOperatingPoint = getOperatingPointGivenFAR(searchOperatingPoints, FPIR);
         lines.append(QString("DET,%1,%2").arg(QString::number(FAR),
-                                              QString::number(1-operatingPoint.TAR)));
-        lines.append(QString("FAR,%1,%2").arg(QString::number(operatingPoint.score),
+                                              QString::number(1-operatingPointFAR.TAR)));
+        lines.append(QString("FAR,%1,%2").arg(QString::number(operatingPointFAR.score),
                                               QString::number(FAR)));
-        lines.append(QString("FRR,%1,%2").arg(QString::number(operatingPoint.score),
-                                              QString::number(1-operatingPoint.TAR)));
-        //multiplier roughly spans 10E-6 to 1
-        FAR *=1.02807;
+        lines.append(QString("FRR,%1,%2").arg(QString::number(operatingPointTAR.score),
+                                              QString::number(FRR)));
+        lines.append(QString("IET,%1,%2").arg(QString::number(searchOperatingPoint.FAR),
+                                              QString::number(1-searchOperatingPoint.TAR)));
     }
 
-    // Write TAR@FAR Table (FT)
+    // Write TAR@FAR Table (TF)
     foreach (float far, QList<float>() << 1e-6 << 1e-5 << 1e-4 << 1e-3 << 1e-2 << 1e-1)
-      lines.append(qPrintable(QString("FT,%1,%2").arg(
+      lines.append(qPrintable(QString("TF,%1,%2").arg(
 						      QString::number(far, 'f'),
 						      QString::number(getOperatingPointGivenFAR(operatingPoints, far).TAR, 'f', 3))));
 
-    // Write FAR@TAR Table (FatT)
-    foreach (float tar, QList<float>() << 0.95 << 0.85 << 0.75 << 0.65 << 0.5 << 0.4)
-      lines.append(qPrintable(QString("FatT,%1,%2").arg(
+    // Write FAR@TAR Table (FT)
+    foreach (float tar, QList<float>() << 0.4 << 0.5 << 0.65 << 0.75 << 0.85 << 0.95)
+      lines.append(qPrintable(QString("FT,%1,%2").arg(
                          QString::number(tar, 'f', 2),
                          QString::number(getOperatingPointGivenTAR(operatingPoints, tar).FAR, 'f', 3))));
 
-    //Write CMC Table (CT)
+    // Write CMC Table (CT)
     lines.append(qPrintable(QString("CT,1,%1").arg(QString::number(getCMC(firstGenuineReturns, 1), 'f', 3))));
     lines.append(qPrintable(QString("CT,5,%1").arg(QString::number(getCMC(firstGenuineReturns, 5), 'f', 3))));
     lines.append(qPrintable(QString("CT,10,%1").arg(QString::number(getCMC(firstGenuineReturns, 10), 'f', 3))));
@@ -367,7 +430,7 @@ float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QSt
 
     // Write Cumulative Match Characteristic (CMC) curve
     const int Max_Retrieval = 200;
-    const int Report_Retrieval = 5;
+    const QList<int> Report_Retrieval_List = QList<int>() << 1 << 5 << 10 << 20 << 50 << 100;
     for (int i=1; i<=Max_Retrieval; i++) {
         const float retrievalRate = getCMC(firstGenuineReturns, i);
         lines.append(qPrintable(QString("CMC,%1,%2").arg(QString::number(i), QString::number(retrievalRate))));
@@ -375,12 +438,18 @@ float Evaluate(const Mat &simmat, const Mat &mask, const QString &csv, const QSt
 
     QtUtils::writeFile(csv, lines);
     if (maxSize > 0) qDebug("Template Size: %i bytes", (int)maxSize);
-    qDebug("TAR @ FAR = 0.01:    %.3f",getOperatingPointGivenFAR(operatingPoints, 0.01).TAR);
-    qDebug("TAR @ FAR = 0.001:   %.3f",getOperatingPointGivenFAR(operatingPoints, 0.001).TAR);
-    qDebug("TAR @ FAR = 0.0001:  %.3f",getOperatingPointGivenFAR(operatingPoints, 0.0001).TAR);
-    qDebug("TAR @ FAR = 0.00001: %.3f",getOperatingPointGivenFAR(operatingPoints, 0.00001).TAR);
-
-    qDebug("\nRetrieval Rate @ Rank = %d: %.3f", Report_Retrieval, getCMC(firstGenuineReturns, Report_Retrieval));
+    foreach (float FAR, QList<float>() << 0.01 << 0.001 << 0.0001 << 0.00001) {
+        const OperatingPoint op = getOperatingPointGivenFAR(operatingPoints, FAR);
+        printf("TAR & Similarity @ FAR = %.0e: %.3f %.3f\n", FAR, op.TAR, op.score);
+    }
+    printf("\n");
+    foreach (float FPIR, QList<float>() << 0.1 << 0.01) {
+        const OperatingPoint op = getOperatingPointGivenFAR(searchOperatingPoints, FPIR);
+        printf("FNIR @ FPIR = %.0e: %.3f\n", FPIR, 1-op.TAR);
+    }
+    printf("\n");
+    foreach (const int Report_Retrieval, Report_Retrieval_List)
+        printf("Retrieval Rate @ Rank = %d: %.3f\n", Report_Retrieval, getCMC(firstGenuineReturns, Report_Retrieval));
 
     return result;
 }
@@ -691,285 +760,6 @@ void EvalClassification(const QString &predictedGallery, const QString &truthGal
     qDebug("Overall Accuracy = %f", (float)tpc / (float)(tpc + fnc));
 }
 
-struct Detection
-{
-    QRectF boundingBox;
-    float confidence;
-    // The ignore flag is useful when certain faces in an image should be ignored
-    // and should not effect detection performance. Predicted detections that overlap
-    // with an ignored truth detection will not count as a true positive, false positive,
-    // true negative, or false negative, it will simply be ignored.
-    bool ignore;
-
-    Detection() {}
-    Detection(const QRectF &boundingBox_, float confidence_ = -1, bool ignore_ = false)
-        : boundingBox(boundingBox_), confidence(confidence_), ignore(ignore_) {}
-
-    float area() const { return boundingBox.width() * boundingBox.height(); }
-    float overlap(const Detection &other) const
-    {
-        const Detection intersection(boundingBox.intersected(other.boundingBox));
-        return intersection.area() / (area() + other.area() - intersection.area());
-    }
-};
-
-struct SortedDetection
-{
-    int truth_idx, predicted_idx;
-    float overlap;
-    SortedDetection() : truth_idx(-1), predicted_idx(-1), overlap(-1) {}
-    SortedDetection(int truth_idx_, int predicted_idx_, float overlap_)
-        : truth_idx(truth_idx_), predicted_idx(predicted_idx_), overlap(overlap_) {}
-    inline bool operator<(const SortedDetection &other) const { return overlap > other.overlap; }
-};
-
-struct Detections
-{
-    QList<Detection> predicted, truth;
-};
-
-struct ResolvedDetection
-{
-    float confidence, overlap;
-    ResolvedDetection() : confidence(-1), overlap(-1) {}
-    ResolvedDetection(float confidence_, float overlap_) : confidence(confidence_), overlap(overlap_) {}
-    inline bool operator<(const ResolvedDetection &other) const { return confidence > other.confidence; }
-};
-
-struct DetectionOperatingPoint
-{
-    float Recall, FalsePositiveRate, Precision;
-    DetectionOperatingPoint() : Recall(-1), FalsePositiveRate(-1), Precision(-1) {}
-    DetectionOperatingPoint(float TP, float FP, float totalPositives, float numImages)
-        : Recall(TP/totalPositives), FalsePositiveRate(FP/numImages), Precision(TP/(TP+FP)) {}
-};
-
-static QStringList computeDetectionResults(const QList<ResolvedDetection> &detections, int totalTrueDetections, int numImages, bool discrete)
-{
-    QList<DetectionOperatingPoint> points;
-    float TP = 0, FP = 0, prevFP = -1;
-
-    for (int i=0; i<detections.size(); i++) {
-        const ResolvedDetection &detection = detections[i];
-        if (discrete) {
-            // A 50% overlap is considered a true positive
-            if (detection.overlap >= 0.5) TP++;
-            else                          FP++;
-        } else {
-            TP += detection.overlap;
-            FP += 1 - detection.overlap;
-        }
-        if ((i == detections.size()-1) || (detection.confidence > detections[i+1].confidence)) {
-            if (FP > prevFP || (i == detections.size()-1)) {
-                if (prevFP / numImages < 0.1 && FP / numImages > 0.1 && discrete) {
-                    qDebug("TAR @ FAR => %f : 0.1", TP / totalTrueDetections);
-                    qDebug("Confidence: %f", detection.confidence);
-                } else if (prevFP / numImages < 0.01 && FP / numImages > 0.01 && discrete) {
-                    qDebug("TAR @ FAR => %f : 0.01", TP / totalTrueDetections);
-                    qDebug("Confidence: %f", detection.confidence);
-                }
-                points.append(DetectionOperatingPoint(TP, FP, totalTrueDetections, numImages));
-                prevFP = FP;
-            }
-        }
-    }
-
-    const int keep = qMin(points.size(), Max_Points);
-    if (keep < 1) qFatal("Insufficient points.");
-
-    QStringList lines; lines.reserve(keep);
-    if (keep == 1) {
-        const DetectionOperatingPoint &point = points[0];
-        lines.append(QString("%1ROC, %2, %3").arg(discrete ? "Discrete" : "Continuous", QString::number(point.FalsePositiveRate), QString::number(point.Recall)));
-        lines.append(QString("%1PR, %2, %3").arg(discrete ? "Discrete" : "Continuous", QString::number(point.Recall), QString::number(point.Precision)));
-    } else {
-        for (int i=0; i<keep; i++) {
-            const DetectionOperatingPoint &point = points[double(i) / double(keep-1) * double(points.size()-1)];
-            lines.append(QString("%1ROC, %2, %3").arg(discrete ? "Discrete" : "Continuous", QString::number(point.FalsePositiveRate), QString::number(point.Recall)));
-            lines.append(QString("%1PR, %2, %3").arg(discrete ? "Discrete" : "Continuous", QString::number(point.Recall), QString::number(point.Precision)));
-        }
-    }
-    return lines;
-}
-
-struct DetectionKey : public QString
-{
-    enum Type {
-        Invalid,
-        Rect,
-        RectList,
-        XYWidthHeight
-    } type;
-
-    DetectionKey(const QString &key = "", Type type = Invalid)
-        : QString(key), type(type) {}
-};
-
-static DetectionKey getDetectKey(const FileList &files)
-{
-    if (files.empty())
-        return DetectionKey();
-
-    const File &f = files.first();
-    const QStringList localKeys = f.localKeys();
-
-    // first check for single detections
-    foreach (const QString &key, localKeys)
-        if (!f.get<QRectF>(key, QRectF()).isNull())
-            return DetectionKey(key, DetectionKey::Rect);
-
-    // and then multiple
-    if (!f.rects().empty())
-        return DetectionKey("Rects", DetectionKey::RectList);
-
-    // check for <Key>_X, <Key>_Y, <Key>_Width, <Key>_Height
-    foreach (const QString &localKey, localKeys) {
-        if (!localKey.endsWith("_X"))
-            continue;
-        const QString key = localKey.mid(0, localKey.size()-2);
-        if (localKeys.contains(key+"_Y") &&
-            localKeys.contains(key+"_Width") &&
-            localKeys.contains(key+"_Height"))
-            return DetectionKey(key, DetectionKey::XYWidthHeight);
-    }
-
-    return DetectionKey();
-}
-
-// return a list of detections independent of the detection key format
-static QList<Detection> getDetections(const DetectionKey &key, const File &f, bool isTruth)
-{
-    QList<Detection> dets;
-    if (key.type == DetectionKey::RectList) {
-        QList<QRectF> rects = f.rects();
-        QList<float> confidences = f.getList<float>("Confidences", QList<float>());
-        if (!isTruth && rects.size() != confidences.size())
-            qFatal("You don't have enough confidence. I mean, your detections don't all have confidence measures.");
-        for (int i=0; i<rects.size(); i++) {
-            if (isTruth)
-                dets.append(Detection(rects[i]));
-            else
-                dets.append(Detection(rects[i], confidences[i]));
-        }
-    } else if (key.type == DetectionKey::Rect) {
-        dets.append(Detection(f.get<QRectF>(key), isTruth ? -1 : f.get<float>("Confidence", -1)));
-    } else if (key.type == DetectionKey::XYWidthHeight) {
-        const QRectF rect(f.get<float>(key+"_X"), f.get<float>(key+"_Y"), f.get<float>(key+"_Width"), f.get<float>(key+"_Height"));
-        dets.append(Detection(rect, isTruth ? -1 : f.get<float>("Confidence", -1), f.get<bool>("Ignore", false)));
-    }
-    return dets;
-}
-
-static QMap<QString, Detections> getDetections(const File &predictedGallery, const File &truthGallery)
-{
-    const FileList predicted = TemplateList::fromGallery(predictedGallery).files();
-    const FileList truth = TemplateList::fromGallery(truthGallery).files();
-
-    // Figure out which metadata field contains a bounding box
-    DetectionKey truthDetectKey = getDetectKey(truth);
-    if (truthDetectKey.isEmpty())
-        qFatal("No suitable ground truth metadata key found.");
-
-    DetectionKey predictedDetectKey = getDetectKey(predicted);
-    if (predictedDetectKey.isEmpty())
-        qFatal("No suitable predicted metadata key found.");
-
-    qDebug("Using metadata key: %s%s",
-           qPrintable(predictedDetectKey),
-           qPrintable(predictedDetectKey == truthDetectKey ? QString() : "/"+truthDetectKey));
-
-    QMap<QString, Detections> allDetections;
-    foreach (const File &f, truth)
-        allDetections[f.name].truth.append(getDetections(truthDetectKey, f, true));
-    foreach (const File &f, predicted)
-        if (allDetections.contains(f.name)) allDetections[f.name].predicted.append(getDetections(predictedDetectKey, f, false));
-    return allDetections;
-}
-
-static inline int getNumberOfImages(const QMap<QString, Detections> detections)
-{   
-    return detections.keys().size();
-}
-
-static int associateGroundTruthDetections(QList<ResolvedDetection> &resolved, QList<ResolvedDetection> &falseNegative, QMap<QString, Detections> &all, QRectF &offsets)
-{
-    float dLeftTotal = 0.0, dRightTotal = 0.0, dTopTotal = 0.0, dBottomTotal = 0.0;
-    int count = 0, totalTrueDetections = 0;
-
-    foreach (Detections detections, all.values()) {
-        totalTrueDetections += detections.truth.size();
-        // Try to associate ground truth detections with predicted detections
-
-        QList<SortedDetection> sortedDetections; sortedDetections.reserve(detections.truth.size() * detections.predicted.size());
-        for (int t = 0; t < detections.truth.size(); t++) {
-            const Detection truth = detections.truth[t];
-            for (int p = 0; p < detections.predicted.size(); p++) {
-                Detection predicted = detections.predicted[p];
-
-                float predictedWidth = predicted.boundingBox.width();
-                float x, y, width, height;
-                x = predicted.boundingBox.x() + offsets.x()*predictedWidth;
-                y = predicted.boundingBox.y() + offsets.y()*predictedWidth;
-                width = predicted.boundingBox.width() - offsets.width()*predictedWidth;
-                height = predicted.boundingBox.height() - offsets.height()*predictedWidth;
-                Detection newPredicted(QRectF(x, y, width, height), 0.0);
-
-                const float overlap = truth.overlap(newPredicted);
-                if (overlap > 0)
-                    sortedDetections.append(SortedDetection(t, p, overlap));
-            }
-        }
-
-        std::sort(sortedDetections.begin(), sortedDetections.end());
-
-        QList<int> removedTruth;
-        QList<int> removedPredicted;
-
-        foreach (const SortedDetection &detection, sortedDetections) {
-            if (removedTruth.contains(detection.truth_idx) || removedPredicted.contains(detection.predicted_idx))
-                continue;
-
-            const Detection truth = detections.truth[detection.truth_idx];
-            const Detection predicted = detections.predicted[detection.predicted_idx];
-
-            if (!truth.ignore) resolved.append(ResolvedDetection(predicted.confidence, detection.overlap));
-
-            removedTruth.append(detection.truth_idx);
-            removedPredicted.append(detection.predicted_idx);
-
-            if (offsets.x() == 0 && detection.overlap > 0.3) {
-                count++;
-                float width = predicted.boundingBox.width();
-                dLeftTotal += (truth.boundingBox.left() - predicted.boundingBox.left()) / width;
-                dRightTotal += (truth.boundingBox.right() - predicted.boundingBox.right()) / width;
-                dTopTotal += (truth.boundingBox.top() - predicted.boundingBox.top()) / width;
-                dBottomTotal += (truth.boundingBox.bottom() - predicted.boundingBox.bottom()) / width;
-            }
-        }
-
-        for (int i = 0; i < detections.predicted.size(); i++)
-            if (!removedPredicted.contains(i)) resolved.append(ResolvedDetection(detections.predicted[i].confidence, 0));
-        for (int i = 0; i < detections.truth.size(); i++)
-            if (!removedTruth.contains(i) && !detections.truth[i].ignore) falseNegative.append(ResolvedDetection(-std::numeric_limits<float>::max(), 0));
-    }
-
-    if (offsets.x() == 0) {
-        // Calculate average differences in each direction
-        float dRight = dRightTotal / count;
-        float dBottom = dBottomTotal / count;
-        float dX = dLeftTotal / count;
-        float dY = dTopTotal / count;
-        float dWidth = dX - dRight;
-        float dHeight = dY - dBottom;
-
-        offsets.setX(dX);
-        offsets.setY(dY);
-        offsets.setWidth(dWidth);
-        offsets.setHeight(dHeight);
-    }
-    return totalTrueDetections;
-}
-
 float EvalDetection(const QString &predictedGallery, const QString &truthGallery, const QString &csv, bool normalize, int minSize, int maxSize)
 {
     qDebug("Evaluating detection of %s against %s", qPrintable(predictedGallery), qPrintable(truthGallery));
@@ -979,51 +769,13 @@ float EvalDetection(const QString &predictedGallery, const QString &truthGallery
     // Remove any bounding boxes with a side smaller than minSize
     if (minSize > 0) {
         qDebug("Removing boxes smaller than %d\n", minSize);
-        QMap<QString, Detections> allFilteredDetections;
-        foreach (QString key, allDetections.keys()) {
-            Detections detections = allDetections[key];
-            Detections filteredDetections;
-            for (int i = 0; i < detections.predicted.size(); i++) {
-                QRectF box = detections.predicted[i].boundingBox;
-                if (min(box.width(), box.height()) > sqrt(0.5 * pow(minSize, 2))) {
-                    filteredDetections.predicted.append(detections.predicted[i]);
-                }
-            }
-            
-            for (int i = 0; i < detections.truth.size(); i++) {
-                QRectF box = detections.truth[i].boundingBox;
-                if (min(box.width(), box.height()) > minSize) {
-                    filteredDetections.truth.append(detections.truth[i]);
-                }
-            }
-            if (!filteredDetections.truth.empty()) allFilteredDetections[key] = filteredDetections;
-        }
-        allDetections = allFilteredDetections;
+        allDetections = filterDetections(allDetections,minSize);
     }
 
     // Remove any bounding boxes with no side smaller than maxSize
     if (maxSize > 0) {
         qDebug("Removing boxes larger than %d\n", maxSize);
-        QMap<QString, Detections> allFilteredDetections;
-        foreach (QString key, allDetections.keys()) {
-            Detections detections = allDetections[key];
-            Detections filteredDetections;
-            for (int i = 0; i < detections.predicted.size(); i++) {
-                QRectF box = detections.predicted[i].boundingBox;
-                if (min(box.width(), box.height()) < sqrt(0.5 * pow(maxSize, 2))) {
-                    filteredDetections.predicted.append(detections.predicted[i]);
-                }
-            }
-
-            for (int i = 0; i < detections.truth.size(); i++) {
-                QRectF box = detections.truth[i].boundingBox;
-                if (min(box.width(), box.height()) < maxSize) {
-                    filteredDetections.truth.append(detections.truth[i]);
-                }
-            }
-            if (!filteredDetections.truth.empty()) allFilteredDetections[key] = filteredDetections;
-        }
-        allDetections = allFilteredDetections;
+        allDetections = filterDetections(allDetections,maxSize,false);
     }
 
     QList<ResolvedDetection> resolvedDetections, falseNegativeDetections;
@@ -1043,11 +795,27 @@ float EvalDetection(const QString &predictedGallery, const QString &truthGallery
         falseNegativeDetections.clear();
         totalTrueDetections = associateGroundTruthDetections(resolvedDetections, falseNegativeDetections, allDetections, normalizations);
     }
+
+    if (Globals->verbose) {
+        qDebug("Total False negatives:");
+        const int numFalseNegatives = 50;
+        for (int i=0; i<numFalseNegatives; i++) {
+            Mat img = imread(qPrintable(Globals->path + "/" + falseNegativeDetections[i].filePath));
+            qDebug() << falseNegativeDetections[i];
+            const Scalar color(0,255,0);
+            rectangle(img, OpenCVUtils::toRect(falseNegativeDetections[i].boundingBox), color, 1);
+            QtUtils::touchDir(QDir("./falseNegs"));
+            imwrite(qPrintable(QString("./falseNegs/falseNeg%1.jpg").arg(QString::number(i))), img);
+        }
+    }
+
     std::sort(resolvedDetections.begin(), resolvedDetections.end());
     QStringList lines;
     lines.append("Plot, X, Y");
-    lines.append(computeDetectionResults(resolvedDetections, totalTrueDetections, getNumberOfImages(allDetections), true));
-    lines.append(computeDetectionResults(resolvedDetections, totalTrueDetections, getNumberOfImages(allDetections), false));
+    QList<DetectionOperatingPoint> points;
+    lines.append(computeDetectionResults(resolvedDetections, totalTrueDetections, getNumberOfImages(allDetections), true, points));
+    points.clear();
+    lines.append(computeDetectionResults(resolvedDetections, totalTrueDetections, getNumberOfImages(allDetections), false, points));
 
     float averageOverlap;
     { // Overlap Density
@@ -1085,16 +853,42 @@ float EvalLandmarking(const QString &predictedGallery, const QString &truthGalle
     QStringList truthNames = File::get<QString>(truth, "name");
 
     int skipped = 0;
-    QList< QList<float> > pointErrors;
+    QList< QList<float> > pointErrorMagnitudes, pointErrorOrientations;
     QList<float> imageErrors;
     QList<float> normalizedLengths;
     for (int i=0; i<predicted.size(); i++) {
         const QString &predictedName = predictedNames[i];
-        const int truthIndex = truthNames.indexOf(predictedName);
+        int truthIndex;
+        if ((i < truthNames.size()) && (truthNames[i] == predictedNames[i]))
+            truthIndex = i;
+        else
+            truthIndex = truthNames.indexOf(predictedName);
         if (truthIndex == -1) qFatal("Could not identify ground truth for file: %s", qPrintable(predictedName));
+
         const QList<QPointF> predictedPoints = predicted[i].file.points();
-        const QList<QPointF> truthPoints = truth[truthIndex].file.points();
-        if (predictedPoints.size() != truthPoints.size() || truthPoints.contains(QPointF(-1,-1))) {
+        QList<QPointF> truthPoints = truth[truthIndex].file.points();
+
+        // Standardize how we represent unlabeled points here
+        const QPointF findNegOne(-1,-1);
+        const QPointF findZero(0,0);
+        const QPointF replace(std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN());
+        for (int j=0; j<truthPoints.size(); j++)
+            if ((truthPoints[j] == findNegOne) || (truthPoints[j] == findZero))
+                truthPoints[j] = replace;
+
+        if (normalizationIndexA >= truthPoints.size()) qFatal("Normalization index A is out of range.");
+        if (normalizationIndexB >= truthPoints.size()) qFatal("Normalization index B is out of range.");
+        const float normalizedLength = QtUtils::euclideanLength(truthPoints[normalizationIndexB] - truthPoints[normalizationIndexA]);
+        const float normalizedOrientation = QtUtils::orientation(truthPoints[normalizationIndexB], truthPoints[normalizationIndexA]);
+
+        if (// If the landmarks don't match up
+            (predictedPoints.size() != truthPoints.size())
+            // Or the landmarks used for normalization are missing
+            || qIsNaN(normalizedLength)
+            // Or the ground truth seems to be for another object in the image
+            || (QtUtils::euclideanLength(predictedPoints[normalizationIndexA] - truthPoints[normalizationIndexA]) / normalizedLength >= 0.5)
+            || (QtUtils::euclideanLength(predictedPoints[normalizationIndexB] - truthPoints[normalizationIndexB]) / normalizedLength >= 0.5)
+           ) {
             predicted.removeAt(i);
             predictedNames.removeAt(i);
             truth.removeAt(i);
@@ -1103,27 +897,70 @@ float EvalLandmarking(const QString &predictedGallery, const QString &truthGalle
             continue;
         }
 
-        while (pointErrors.size() < predictedPoints.size())
-            pointErrors.append(QList<float>());
+        while (pointErrorMagnitudes.size() < predictedPoints.size()) {
+            pointErrorMagnitudes.append(QList<float>());
+            pointErrorOrientations.append(QList<float>());
+        }
 
         // Want to know error for every image.
-
-        if (normalizationIndexA >= truthPoints.size()) qFatal("Normalization index A is out of range.");
-        if (normalizationIndexB >= truthPoints.size()) qFatal("Normalization index B is out of range.");
-        const float normalizedLength = QtUtils::euclideanLength(truthPoints[normalizationIndexB] - truthPoints[normalizationIndexA]);
         normalizedLengths.append(normalizedLength);
         float totalError = 0;
+        int totalCount = 0;
         for (int j=0; j<predictedPoints.size(); j++) {
-            float error = QtUtils::euclideanLength(predictedPoints[j] - truthPoints[j])/normalizedLength;
-            totalError += error;
-            pointErrors[j].append(error);
+            const float error = QtUtils::euclideanLength(predictedPoints[j] - truthPoints[j])/normalizedLength;
+            if (!qIsNaN(error)) {
+                totalError += error;
+                pointErrorMagnitudes[j].append(error);
+                pointErrorOrientations[j].append(QtUtils::orientation(predictedPoints[j], truthPoints[j]) - normalizedOrientation);
+                totalCount++;
+            }
         }
-        imageErrors.append(totalError/predictedPoints.size());
+        imageErrors.append(totalError/totalCount);
     }
 
-    qDebug() << "Skipped" << skipped << "files due to point size mismatch.";
+    qDebug("Files skipped: %d", skipped);
 
-    QList<float> averagePointErrors; averagePointErrors.reserve(pointErrors.size());
+    // Adjust the point error to not penalize for systematic biases...
+    // ... by first calculating the average bias for each point
+    QList<QPointF> averagePointBiases;
+    for (int i=0; i<pointErrorMagnitudes.size(); i++) {
+        const QList<float> &magnitudes   = pointErrorMagnitudes[i];
+        const QList<float> &orientations = pointErrorOrientations[i];
+        QPointF cumulativePointBias;
+        for (int j=0; j<magnitudes.size(); j++) {
+            const float m = magnitudes[j];
+            const float o = orientations[j];
+            cumulativePointBias += QPointF(m*cos(o), m*sin(o));
+        }
+        averagePointBiases.append(cumulativePointBias / magnitudes.size());
+    }
+
+    // ... and then subtracting the average bias from each individual error.
+    for (int i=0; i<pointErrorMagnitudes.size(); i++) {
+        QList<float> &magnitudes   = pointErrorMagnitudes[i];
+        QList<float> &orientations = pointErrorOrientations[i];
+        const QPointF &bias = averagePointBiases[i];
+        for (int j=0; j<magnitudes.size(); j++) {
+            float &m = magnitudes[j];
+            float &o = orientations[j];
+            QPointF error(m*cos(o), m*sin(o));
+            error -= bias;
+            // At this point if we added up all the `error` vectors for a
+            // landmark they would sum to zero. Josh confirmed this when
+            // implementing the bias normalization correction, but removed it
+            // from the final implementation.
+
+            // Update the error magnitude for reporting MAE
+             m = QtUtils::euclideanLength(error);
+
+            // We don't need to update orientation because we don't use it
+            // again, but we do so anyway in the interest of pedantic
+            // correctness.
+            o = QtUtils::orientation(QPointF(0.f,0.f), error);
+        }
+    }
+
+    QList<float> averagePointErrors; averagePointErrors.reserve(pointErrorMagnitudes.size());
 
     QStringList lines;
     lines.append("Plot,X,Y");
@@ -1133,9 +970,9 @@ float EvalLandmarking(const QString &predictedGallery, const QString &truthGalle
 
     // Example
     {
-        QScopedPointer<Transform> t(Transform::make("Open+Draw(verbose,rects=false,location=false)",NULL));
+        QScopedPointer<Transform> t(Transform::make("Open+Draw(verbose,rects=false,named=false,location=false)",NULL));
 
-        QString filePath = "landmarking_examples_truth/"+truth[sampleIndex].file.fileName();
+        QString filePath = "landmarking_examples_truth/sample.jpg";
         projectAndWrite(t.data(), truth[sampleIndex],filePath);
         lines.append("Sample,"+filePath+","+QString::number(truth[sampleIndex].file.points().size()));
     }
@@ -1143,32 +980,32 @@ float EvalLandmarking(const QString &predictedGallery, const QString &truthGalle
     // Get best and worst performing examples
     QList< QPair<float,int> > exampleIndices = Common::Sort(imageErrors,true);
 
-    QScopedPointer<Transform> t(Transform::make("Open+Draw(rects=false)",NULL));
+    QScopedPointer<Transform> t(Transform::make("Open+CropFromLandmarks(paddingHorizontal=.3,paddingVertical=.3,shiftPoints=true)+Resize(128,method=Area)+Draw(rects=false,pointRadius=2)",NULL));
 
     for (int i=0; i<totalExamples; i++) {
         QString filePath = "landmarking_examples_truth/"+truth[exampleIndices[i].second].file.fileName();
         projectAndWrite(t.data(), truth[exampleIndices[i].second],filePath);
-        lines.append("EXT,"+filePath+","+QString::number(exampleIndices[i].first));
+        lines.append("EXT,"+filePath+":"+truth[exampleIndices[i].second].file.name+","+QString::number(exampleIndices[i].first));
 
         filePath = "landmarking_examples_predicted/"+predicted[exampleIndices[i].second].file.fileName();
         projectAndWrite(t.data(), predicted[exampleIndices[i].second],filePath);
-        lines.append("EXP,"+filePath+","+QString::number(exampleIndices[i].first));
+        lines.append("EXP,"+filePath+":"+ predicted[exampleIndices[i].second].file.name+","+QString::number(exampleIndices[i].first));
     }
 
     for (int i=exampleIndices.size()-1; i>exampleIndices.size()-totalExamples-1; i--) {
         QString filePath = "landmarking_examples_truth/"+truth[exampleIndices[i].second].file.fileName();
         projectAndWrite(t.data(), truth[exampleIndices[i].second],filePath);
-        lines.append("EXT,"+filePath+","+QString::number(exampleIndices[i].first));
+        lines.append("EXT,"+filePath+":"+truth[exampleIndices[i].second].file.name+","+QString::number(exampleIndices[i].first));
 
         filePath = "landmarking_examples_predicted/"+predicted[exampleIndices[i].second].file.fileName();
         projectAndWrite(t.data(), predicted[exampleIndices[i].second],filePath);
-        lines.append("EXP,"+filePath+","+QString::number(exampleIndices[i].first));
+        lines.append("EXP,"+filePath+":"+predicted[exampleIndices[i].second].file.name+","+QString::number(exampleIndices[i].first));
     }
 
-    for (int i=0; i<pointErrors.size(); i++) {
-        std::sort(pointErrors[i].begin(), pointErrors[i].end());
-        averagePointErrors.append(Common::Mean(pointErrors[i]));
-        const QList<float> &pointError = pointErrors[i];
+    for (int i=0; i<pointErrorMagnitudes.size(); i++) {
+        QList<float> &pointError = pointErrorMagnitudes[i];
+        std::sort(pointError.begin(), pointError.end());
+        averagePointErrors.append(Common::Mean(pointError));
         const int keep = qMin(Max_Points, pointError.size());
         for (int j=0; j<keep; j++)
             lines.append(QString("Box,%1,%2").arg(QString::number(i), QString::number(pointError[j*(pointError.size()-1)/(keep-1)])));
@@ -1181,7 +1018,7 @@ float EvalLandmarking(const QString &predictedGallery, const QString &truthGalle
 
     QtUtils::writeFile(csv, lines);
 
-    qDebug("Average Error for all Points: %.3f", averagePointError);
+    qDebug("Mean Average Error: %.4f", averagePointError);
 
     return averagePointError;
 }
@@ -1240,5 +1077,234 @@ void EvalRegression(const QString &predictedGallery, const QString &truthGallery
     qDebug("RMS Error = %f", sqrt(rmsError/predicted.size()));
     qDebug("MAE = %f", maeError/predicted.size());
 }
+
+void readKNN(size_t &probeCount, size_t &k, QVector<Candidate> &neighbors, const QString &fileName)
+{
+    QFile file(fileName);
+    if (!file.open(QFile::ReadOnly))
+        qFatal("Failed to open k-NN file for reading!");
+    file.read((char*) &probeCount, sizeof(size_t));
+    file.read((char*) &k, sizeof(size_t));
+    neighbors.resize(probeCount * k);
+
+    file.read((char*) neighbors.data(), probeCount * k * sizeof(Candidate));
+}
+
+void readKNNTruth(size_t probeCount, QVector< QList<size_t> > &groundTruth, const QString &fileName)
+{
+    groundTruth.reserve(probeCount);
+    QFile truthFile(fileName);
+    if (!truthFile.open(QFile::ReadOnly | QFile::Text))
+        qFatal("Failed to open k-NN ground truth file for reading!");
+    size_t i=0;
+    while (!truthFile.atEnd()) {
+        const QString line = truthFile.readLine().trimmed();
+        if (!line.isEmpty())
+            foreach (const QString &index, line.split('\t')) {
+                bool ok;
+                groundTruth[i].append(index.toLong(&ok));
+                if (!ok)
+                    qFatal("Failed to parse long in k-NN ground truth!");
+            }
+        i++;
+    }
+    if (i != probeCount)
+        qFatal("Invalid ground truth file!");
+}
+
+void EvalKNN(const QString &knnGraph, const QString &knnTruth, const QString &csv)
+{
+    qDebug("Evaluating k-NN of %s against %s", qPrintable(knnGraph), qPrintable(knnTruth));
+
+    size_t probeCount;
+    size_t k;
+    QVector<Candidate> neighbors;
+    readKNN(probeCount, k, neighbors, knnGraph);
+
+    /*
+     * Read the ground truth from disk.
+     * Line i contains the template indicies of the mates for probe i.
+     * See the `gtGallery` implementation for details.
+     */
+    QVector< QList<size_t> > truth(probeCount);
+    readKNNTruth(probeCount, truth, knnTruth);
+
+    /*
+     * For each probe, record the similarity of the highest mate (if one exists) and the highest non-mate.
+     */
+    QVector<int> firstGenuineReturns(probeCount, 0);
+    QList<float> matedSimilarities, unmatedSimilarities;
+    size_t numMatedSearches = 0, numUnmatedSearches = 0;
+    for (size_t i=0; i<probeCount; i++) {
+        const QList<size_t> &mates = truth[i];
+        bool recordedHighestMatedSimilarity = false;
+        bool recordedHighestUnmatedSimilarity = false;
+        if (!mates.empty()) {
+            numMatedSearches++;
+            recordedHighestUnmatedSimilarity = true;
+        } else {
+            numUnmatedSearches++;
+            recordedHighestMatedSimilarity = true;
+        }
+
+        for (size_t j=0; j<k; j++) {
+            const Candidate &neighbor = neighbors[i*k+j];
+
+            if (mates.contains(neighbor.index)) {
+                // Found a mate
+                if (!recordedHighestMatedSimilarity) {
+                    matedSimilarities.append(neighbor.similarity);
+                    recordedHighestMatedSimilarity = true;
+                }
+                if (firstGenuineReturns[i] < 1) firstGenuineReturns[i] = abs(firstGenuineReturns[i])+1;
+            } else {
+                // Found a non-mate
+                if (!recordedHighestUnmatedSimilarity) {
+                    unmatedSimilarities.append(neighbor.similarity);
+                    recordedHighestUnmatedSimilarity = true;
+                }
+                if (firstGenuineReturns[i] < 1) firstGenuineReturns[i]--;
+            }
+
+            if (recordedHighestMatedSimilarity && recordedHighestUnmatedSimilarity)
+                break; // we can stop scanning the candidate list for this probe
+        }
+    }
+
+    // Sort the similarity scores lowest-to-highest
+    std::sort(matedSimilarities.begin(), matedSimilarities.end());
+    std::sort(unmatedSimilarities.begin(), unmatedSimilarities.end());
+    const size_t numMatedSimilarities = matedSimilarities.size();
+
+    if (numMatedSearches == 0)
+        qFatal("No mated searches!");
+
+    if (numUnmatedSearches == 0)
+        qFatal("No unmated searches!");
+
+
+    qDebug("Rank-%d Return Rate: %.3f", 1, getCMC(firstGenuineReturns, 1, numMatedSearches));
+    if (k >=5)
+        qDebug("Rank-%d Return Rate: %.3f", 5, getCMC(firstGenuineReturns, 5, numMatedSearches));
+    if (k >=10)
+        qDebug("Rank-%d Return Rate: %.3f", 10, getCMC(firstGenuineReturns, 10, numMatedSearches));
+
+    qDebug("Rank-%zu Return Rate: %.3f", k, double(numMatedSimilarities) / double(numMatedSearches));
+
+    /*
+     * Iterate through the similarity scores highest-to-lowest,
+     * for each threshold count the number mated and unmated searches,
+     * record the corresponding FPIR and FNIR values for the threshold.
+     */
+    QList<OperatingPoint> operatingPoints;
+    size_t matedCount = 0, previousMatedCount = 0;
+    size_t unmatedCount = 0, previousUnmatedCount = 0;
+    while (!matedSimilarities.empty()) {
+        const float threshold = matedSimilarities.back();
+        while (!matedSimilarities.empty() && (matedSimilarities.back() >= threshold)) {
+            matedSimilarities.removeLast();
+            matedCount++;
+        }
+        while (!unmatedSimilarities.empty() && (unmatedSimilarities.back() >= threshold)) {
+            unmatedSimilarities.removeLast();
+            unmatedCount++;
+        }
+        if ((unmatedCount > previousUnmatedCount) && (matedCount > previousMatedCount)) {
+            previousMatedCount = matedCount;
+            previousUnmatedCount = unmatedCount;
+            operatingPoints.append(OperatingPoint(threshold,
+                                                  double(unmatedCount) / double(numUnmatedSearches),
+                                                  1.0 - double(matedCount) / double(numMatedSearches)));
+        }
+    }
+
+    if (!csv.isEmpty()) {
+        // Open the output file
+        QFile ietFile(csv);
+        if (!ietFile.open(QFile::WriteOnly | QFile::Text))
+            qFatal("Failed to open IET file for writing!");
+        ietFile.write("Plot,X,Y,Z\n");
+        // Write CMC
+        const int Max_Retrieval = min(200, (int)k);
+        for (int i=1; i<=Max_Retrieval; i++) {
+            const float retrievalRate = getCMC(firstGenuineReturns, i, numMatedSearches);
+            ietFile.write(qPrintable(QString("CMC,%1,%2,0\n").arg(QString::number(i), QString::number(retrievalRate))));
+        }
+
+        foreach(const OperatingPoint &operatingPoint, operatingPoints)
+            ietFile.write(qPrintable("IET," +
+                                     QString::number(operatingPoint.FAR) + "," +
+                                     QString::number(operatingPoint.TAR) + "," +
+                                     QString::number(operatingPoint.score) + "\n"));
+    }
+
+    qDebug("FNIR @ FPIR = 0.1:   %.3f", 1-getOperatingPointGivenFAR(operatingPoints, 0.1).TAR);
+    qDebug("FNIR @ FPIR = 0.01:  %.3f", 1-getOperatingPointGivenFAR(operatingPoints, 0.01).TAR);
+}
+
+void EvalEER(const QString &predictedXML, QString gt_property, QString distribution_property){
+    if (gt_property.isEmpty())
+            gt_property = "LivenessGT";
+    if (distribution_property.isEmpty())
+            distribution_property = "LivenessDistribution";
+    double classOneTemplateCount = 0;
+    const TemplateList templateList(TemplateList::fromGallery(predictedXML));
+
+    QHash<QString, int> gtLabels;
+    QHash<QString, QList<float> > scores;
+     for (double i=0; i<templateList.size(); i++) {
+	 if (!templateList[i].file.contains(distribution_property) || !templateList[i].file.contains(gt_property))
+             continue;
+         QString templateKey = templateList[i].file.path() + templateList[i].file.baseName();
+         int gtLabel = templateList[i].file.get<int>(gt_property);
+         if (gtLabel == 1)
+             classOneTemplateCount++;
+         QList<float> templateScores = templateList[i].file.getList<float>(distribution_property);
+         gtLabels[templateKey] = gtLabel;
+         scores[templateKey] = templateScores;
+     }
+
+     const int numPoints = 200;
+     const float stepSize = 100.0/numPoints;
+     const double numTemplates = scores.size();
+     float thres = 0.0; //Between [0,100]
+     float thresNorm = 0.0; //Between [0,1]
+     double FA = 0, FR = 0;
+     float minDiff = 100;
+     float EER = 100;
+     float EERThres = 0;
+
+     for(int i = 0; i <= numPoints; i++){
+         FA = 0, FR = 0;
+         thresNorm = thres/100.0;
+            foreach(const QString &key, scores.keys()){
+                int gtLabel = gtLabels[key];
+                //> thresNorm = class 0 (spoof) : < thresNorm = class 1 (genuine)
+                if (scores[key][0] >= thresNorm && gtLabel == 0)
+                    continue;
+                else if (scores[key][0] < thresNorm && gtLabel == 1)
+                    continue;
+                else if (scores[key][0] >= thresNorm && gtLabel == 1)
+                    FR +=1;
+                else if (scores[key][0] < thresNorm && gtLabel == 0)
+                    FA +=1;
+            }
+            float FAR = FA / fabs(numTemplates - classOneTemplateCount);
+            float FRR = FR / float(classOneTemplateCount);
+
+            float diff = std::abs(FAR-FRR);
+            if (diff < minDiff){
+                minDiff = diff;
+                EER = (FAR+FRR)/2.0;
+                EERThres = thresNorm;
+            }
+         thres += stepSize;
+     }
+
+     qDebug() <<"Class 0 Templates:" << fabs(numTemplates - classOneTemplateCount) << "Class 1 Templates:"
+             << classOneTemplateCount << "Total Templates:" << numTemplates;
+     qDebug("EER: %.3f @ Threshold %.3f", EER*100, EERThres);
+}
+
 
 } // namespace br

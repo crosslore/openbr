@@ -23,23 +23,21 @@ namespace br
  * \ingroup galleries
  * \brief Treats each line as a file.
  * \author Josh Klontz \cite jklontz
+ * \br_format The entire line is treated as the file path.
  *
- * The entire line is treated as the file path. An optional label may be specified using a space ' ' separator:
+ * <FILE>
+ * <FILE>
+ * ...
+ * <FILE>
  *
-\verbatim
-<FILE>
-<FILE>
-...
-<FILE>
-\endverbatim
- * or
-\verbatim
-<FILE> <LABEL>
-<FILE> <LABEL>
-...
-<FILE> <LABEL>
-\endverbatim
- * \see csvGallery
+ * An optional label may be specified using a space ' ' separator:
+ *
+ * <FILE> <LABEL>
+ * <FILE> <LABEL>
+ * ...
+ * <FILE> <LABEL>
+ *
+ * \br_related_plugin csvGallery
  */
 class txtGallery : public FileGallery
 {
@@ -63,7 +61,7 @@ class txtGallery : public FileGallery
 
             if (!line.isEmpty()){
                 int splitIndex = line.lastIndexOf(' ');
-                if (splitIndex == -1) templates.append(File(line));
+                if (splitIndex == -1) templates.append(File(line, QFileInfo(line).dir().dirName()));
                 else                  templates.append(File(line.mid(0, splitIndex), line.mid(splitIndex+1)));
                 templates.last().file.set("progress", this->position());
             }

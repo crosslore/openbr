@@ -25,9 +25,11 @@ namespace br
 
 /*!
  * \ingroup transforms
- * \brief Clones the transform so that it can be applied independently.
+ * \brief Clones the Transform so that it can be applied independently.
+ *
+ * Independent Transforms expect single-matrix Templates.
+ *
  * \author Josh Klontz \cite jklontz
- * \em Independent transforms expect single-matrix templates.
  */
 class IndependentTransform : public MetaTransform
 {
@@ -219,6 +221,13 @@ class IndependentTransform : public MetaTransform
             transforms.append(transform->clone());
         for (int i=0; i<size; i++)
             transforms[i]->load(stream);
+    }
+
+    QByteArray likely(const QByteArray &indentation) const
+    {
+        if (transforms.size() != 1)
+            return "src"; // TODO: implement
+        return transforms.first()->likely(indentation);
     }
 };
 
