@@ -249,7 +249,7 @@ QList<QRectF> File::rects() const
 {
     QList<QRectF> rects;
     foreach (const QVariant &rect, m_metadata["Rects"].toList())
-        rects.append(rect.toRect());
+        rects.append(rect.toRectF());
     return rects;
 }
 
@@ -1118,6 +1118,11 @@ void Object::setProperty(const QString &name, QVariant value)
         if      (value.isNull())   value = true;
         else if (value == "false") value = false;
         else if (value == "true")  value = true;
+    } else if (type == "cv::Mat") {
+        if (value.toString().isEmpty())
+            value.setValue(cv::Mat());
+        else
+            qFatal("QString to cv::Mat not implemented!");
     }
 
     if (!QObject::setProperty(qPrintable(name), value) && !type.isEmpty())
@@ -1231,7 +1236,7 @@ bool br::Context::checkSDKPath(const QString &sdkPath)
 // Since we can't ensure that it gets deleted last, we never delete it.
 static QCoreApplication *application = NULL;
 
-void br::Context::initialize(int &argc, char *argv[], QString sdkPath, bool useGui)
+void br::Context::initialize(int &argc, char **argv, QString sdkPath, bool useGui)
 {
     QString sep;
 #ifndef _WIN32

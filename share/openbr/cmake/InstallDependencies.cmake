@@ -174,7 +174,15 @@ function(install_qt_misc)
     endif()
 
     file(GLOB icudlls ${_qt5Core_install_prefix}/lib/${QT_MULTIARCH}libicu*.so*)
+    if(NOT icudlls)
+      file(GLOB icudlls /usr/lib/x86_64-linux-gnu/libicu*.so*)
+    endif()
     install(FILES ${icudlls} DESTINATION lib)
+
+    file(GLOB libpng12 /lib/x86_64-linux-gnu/libpng12.so*)
+    if(libpng12)
+      install(FILES ${libpng12} DESTINATION lib)
+    endif()
   endif()
 endfunction()
 

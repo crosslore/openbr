@@ -8,7 +8,7 @@ library("png")
 library("grid")
 
 # Code to format FAR values
-far_names <- list('0.001'="FAR = 0.1%", '0.01'="FAR = 1%")
+far_names <- list('0.0001'="FAR = 0.01%", '0.001'="FAR = 0.1%", '0.01'="FAR = 1%")
 far_labeller <- function(variable,value) {
     if (as.character(value) %in% names(far_names)) {
         return(far_names[as.character(value)])
@@ -19,9 +19,9 @@ far_labeller <- function(variable,value) {
 
 getScale <- function(mode, title, vals) {
     if      (vals > 12) return(do.call(paste("scale", mode, "discrete", sep="_"), list(title)))
-    else if (vals > 11) return(do.call(paste("scale", mode, "brewer", sep="_"), list(title, palette="Set3")))
-    else if (vals > 9)  return(do.call(paste("scale", mode, "brewer", sep="_"), list(title, palette="Paired")))
-    else                return(do.call(paste("scale", mode, "brewer", sep="_"), list(title, palette="Set1")))
+    else if (vals > 11) return(do.call(paste("scale", mode, "brewer", sep="_"), list(title, palette=(if(seq) "Reds" else "Set3"), type=(if(seq) "seq" else "qual"))))
+    else if (vals > 9)  return(do.call(paste("scale", mode, "brewer", sep="_"), list(title, palette=(if(seq) "Reds" else "Paired"), type=(if(seq) "seq" else "qual"))))
+    else                return(do.call(paste("scale", mode, "brewer", sep="_"), list(title, palette=(if(seq) "Reds" else "Set1"), type=(if(seq) "seq" else "qual"))))
 }
 
 plotMetadata <- function(metadata=NULL, title=NULL) {
@@ -80,7 +80,7 @@ plotLandmarkTables <- function(tableData=NULL) {
     print(title("Landmarking Error Rates"))
 }
 
-plotLine <- function(lineData=NULL, options=NULL, flipY=FALSE, geometry="line") {
+plotLine <- function(lineData=NULL, options=NULL, flipY=FALSE, geometry="path") {
     textSize <- if("textSize" %in% names(options)) as.numeric(options$textSize) else 12
     p <- qplot(X, if(flipY) 1-Y else Y, data=lineData, main=options$title, geom=geometry, size=if("size" %in% names(options)) I(as.numeric(options$size)) else I(.5), colour=if(majorSize > 1) factor(eval(parse(text=majorHeader))) else NULL, linetype=if(minorSize > 1) factor(eval(parse(text=minorHeader))) else NULL, xlab=options$xTitle, ylab=options$yTitle) + theme_minimal()
     if (smooth && deparse(substitute(lineData)) != "CMC" && confidence != 0) p <- p + geom_errorbar(data=lineData[seq(1, NROW(lineData), by = 29),], aes(x=X, ymin=if(flipY) (1-lower) else lower, ymax=if(flipY) (1-upper) else upper), width=0.1, alpha=I(1/2))
@@ -97,8 +97,12 @@ plotLine <- function(lineData=NULL, options=NULL, flipY=FALSE, geometry="line") 
     else
         p <- p + scale_y_continuous(labels=if("yLabels" %in% names(options)) eval(parse(text=options$yLabels)) else percent, breaks=if("yBreaks" %in% names(options)) eval(parse(text=options$yBreaks)) else pretty_breaks(n=10))
 
-    if ("xLimits" %in% names(options)) p <- p + coord_cartesian(xlim=eval(parse(text=options$xLimits)))
-    if ("yLimits" %in% names(options)) p <- p + coord_cartesian(ylim=eval(parse(text=options$yLimits)))
+    if ("xLimits" %in% names(options) && "yLimits" %in% names(options)) {
+        p <- p + coord_cartesian(xlim=eval(parse(text=options$xLimits)), ylim=eval(parse(text=options$yLimits)))
+    } else {
+        if ("xLimits" %in% names(options)) p <- p + coord_cartesian(xlim=eval(parse(text=options$xLimits)))
+        if ("yLimits" %in% names(options)) p <- p + coord_cartesian(ylim=eval(parse(text=options$yLimits)))
+    }
     p <- p + theme(legend.title = element_text(size = textSize), legend.text = element_text(size = textSize), plot.title = element_text(size = textSize), axis.text = element_text(size = textSize), axis.title.x = element_text(size = textSize), axis.title.y = element_text(size = textSize), legend.position=if("legendPosition" %in% names(options)) eval(parse(text=options$legendPosition)) else "bottom", legend.background = element_rect(fill = 'white'), panel.grid.major = element_line(colour = "gray"), panel.grid.minor = element_line(colour = "gray", linetype = "dashed"))
     p <- p + guides(col=guide_legend(ncol=ncol))
     return(p)
@@ -136,22 +140,6 @@ plotBC <- function(bcData=NULL) {
     return(p)
 }
 
-plotERR <- function(errData=NULL) {
-    p <- qplot(X, Y, data=errData, geom="line", linetype=Error, colour=if(flip && (majorSize > 1)) factor(eval(parse(text=majorHeader))) else if (minorSize > 1) factor(eval(parse(text=minorHeader))) else NULL, xlab="Score", ylab="Error Rate") + theme_minimal()
-
-    if (flip && (majorSize > 1)) p <- p + getScale("colour", majorHeader, majorSize) + labs(colour=majorHeader)
-    else if (minorSize > 1)      p <- p + getScale("colour", minorHeader, minorSize) + labs(colour=minorHeader)
-
-    p <- p + scale_y_log10(labels=percent) + annotation_logticks(sides="l")
-    if (flip && (minorSize > 1)) {
-        p <- p + facet_wrap(as.formula(paste("~", minorHeader)), scales="free_x")
-    } else if (majorSize > 1) {
-        p <- p + facet_wrap(as.formula(paste("~", majorHeader)), scales="free_x")
-    }
-    p <- p + theme(aspect.ratio=1)
-    return(p)
-}
-
 plotOverlap <- function(overlapData=NULL) {
     p <- qplot(X, data=overlapData, geom="histogram", position="identity", xlab="Overlap", ylab="Frequency")
     p <- p + theme_minimal() + scale_x_continuous(minor_breaks=NULL) + scale_y_continuous(minor_breaks=NULL) + theme(axis.text.y=element_blank(), axis.ticks=element_blank(), axis.text.x=element_text(angle=-90, hjust=0))
@@ -175,8 +163,8 @@ formatData <- function(type="eval") {
         GM <<- data[grep("GM",data$Plot),-c(1)]
         DET <<- data[grep("DET",data$Plot),-c(1)]
         IET <<- data[grep("IET",data$Plot),-c(1)]
-        FAR <- data[grep("FAR",data$Plot),-c(1)]
-        FRR <- data[grep("FRR",data$Plot),-c(1)]
+        FAR <<- data[grep("FAR",data$Plot),-c(1)]
+        FRR <<- data[grep("FRR",data$Plot),-c(1)]
         SD <<- data[grep("SD",data$Plot),-c(1)]
         TF <<- data[grep("TF",data$Plot),-c(1)]
         FT <<- data[grep("FT",data$Plot),-c(1)]
@@ -184,9 +172,6 @@ formatData <- function(type="eval") {
         BC <<- data[grep("BC",data$Plot),-c(1)]
         TS <<- data[grep("TS",data$Plot),-c(1)]
         CMC <<- data[grep("CMC",data$Plot),-c(1)]
-        FAR$Error <- "FAR"
-        FRR$Error <- "FRR"
-        ERR <<- rbind(FAR, FRR)
     
         # Format data
         Metadata$Y<-factor(Metadata$Y, levels=c("Genuine", "Impostor", "Ignored", "Gallery", "Probe"))
@@ -194,7 +179,8 @@ formatData <- function(type="eval") {
         GM$Y <<- as.character(GM$Y)
         DET$Y <<- as.numeric(as.character(DET$Y))
         IET$Y <<- as.numeric(as.character(IET$Y))
-        ERR$Y <<- as.numeric(as.character(ERR$Y))
+        FAR$Y <<- as.numeric(as.character(FAR$Y))
+        FRR$Y <<- as.numeric(as.character(FRR$Y))
         SD$Y <<- as.factor(unique(as.character(SD$Y)))
         TF$Y <<- as.numeric(as.character(TF$Y))
         FT$Y <<- as.numeric(as.character(FT$Y))

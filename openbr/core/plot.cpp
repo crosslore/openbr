@@ -91,7 +91,10 @@ struct RPlot
         if (!success) qFatal("Failed to open %s for writing.", qPrintable(file.fileName()));
 
         // Copy plot_utils.R into output script with source()
-        file.write(qPrintable(QString("source(\"%1\")\n\n").arg(Globals->sdkPath + "/share/openbr/plotting/plot_utils.R")));
+        QString plotUtilsPath = Globals->sdkPath + "/openbr/share/openbr/plotting/plot_utils.R"; // Handle case when OpenBR is a submodule
+        if (!QFileInfo(plotUtilsPath).exists())
+            plotUtilsPath = Globals->sdkPath + "/share/openbr/plotting/plot_utils.R";
+        file.write(qPrintable(QString("source(\"%1\")\n\n").arg(plotUtilsPath)));
         file.write("# Read CSVs\n"
                    "data <- NULL\n");
 
@@ -136,6 +139,7 @@ struct RPlot
         // Set variables in R
         file.write(qPrintable(QString("\nconfidence <- %1\n").arg(destination.get<float>("confidence", 95) / 100.0)));
         file.write(qPrintable(QString("ncol <- %1\n").arg(destination.get<int>("ncol", major.size > 1 ? major.size : (minor.header.isEmpty() ? major.size : minor.size)))));
+        file.write(qPrintable(QString("seq <- %1\n").arg(destination.get<bool>("seq", false) ? "TRUE": "FALSE")));
         file.write(qPrintable(QString("basename <- \"%1\"\n").arg(basename)));
         file.write(qPrintable(QString("smooth <- %1\n").arg((major.smooth || minor.smooth) && (destination.get<float>("confidence", 95) / 100.0) != 0 ? "TRUE" : "FALSE")));
         file.write(qPrintable(QString("csv <- %1\n").arg(destination.getBool("csv") ? "TRUE" : "FALSE")));
@@ -192,10 +196,12 @@ bool Plot(const QStringList &files, const File &destination, bool show)
 
     // Use a br::file for simple storage of plot options
     QMap<QString,File> optMap;
-    optMap.insert("rocOptions", File(QString("[xTitle=False Accept Rate,yTitle=True Accept Rate,xLog=true,yLog=false]")));
-    optMap.insert("detOptions", File(QString("[xTitle=False Accept Rate,yTitle=False Reject Rate,xLog=true,yLog=true]")));
+    optMap.insert("rocOptions", File(QString("[xTitle=False Accept Rate,yTitle=True Accept Rate,xLog=true,yLog=false,xLimits=(.0000001,.1)]")));
+    optMap.insert("detOptions", File(QString("[xTitle=False Accept Rate,yTitle=False Reject Rate,xLog=true,yLog=true,xLimits=(.0000001,.1),yLimits=(.0001,1)]")));
     optMap.insert("ietOptions", File(QString("[xTitle=False Positive Identification Rate (FPIR),yTitle=False Negative Identification Rate (FNIR),xLog=true,yLog=true]")));
     optMap.insert("cmcOptions", File(QString("[xTitle=Rank,yTitle=Retrieval Rate,xLog=true,yLog=false,size=1,xLabels=(1,5,10,50,100),xBreaks=(1,5,10,50,100)]")));
+    optMap.insert("farOptions", File(QString("[xTitle=Score,yTitle=False Accept Rate,xLog=false,yLog=true,xLabels=waiver(),yLimits=(.0000001,1)]")));
+    optMap.insert("frrOptions", File(QString("[xTitle=Score,yTitle=False Reject Rate,xLog=false,yLog=true,xLabels=waiver(),yLimits=(.0001,1)]")));
 
     foreach (const QString &key, optMap.keys()) {
         const QStringList options = destination.get<QStringList>(key, QStringList());
@@ -232,7 +238,8 @@ bool Plot(const QStringList &files, const File &destination, bool show)
     p.file.write(qPrintable(QString(plot).arg("CMC", toRList(optMap["cmcOptions"]), "FALSE")));
     p.file.write("plot <- plotSD(sdData=SD)\nplot\n");
     p.file.write("plot <- plotBC(bcData=BC)\nplot\n");
-    p.file.write("plot <- plotERR(errData=ERR)\nplot\n");
+    p.file.write(qPrintable(QString(plot).arg("FAR", toRList(optMap["farOptions"]), "FALSE")));
+    p.file.write(qPrintable(QString(plot).arg("FRR", toRList(optMap["frrOptions"]), "FALSE")));
     p.file.write("plotEERSamples(imData=IM, gmData=GM)\n\n");
 
     return p.finalize(show);
